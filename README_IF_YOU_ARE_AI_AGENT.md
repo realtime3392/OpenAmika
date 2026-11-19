@@ -31,7 +31,7 @@ ever disagree, the code wins, and you should fix this file in the same change.
    never put a token on a command line that ends up in a log (prefer environment variables). `.gitignore` already
    excludes every such file; never `git add -f` one.
 5. **Never commit machine-local state**: `settings.json`, `envs/`, `logs/`, `memory_f/`, `brain/memories/`,
-   `config/ollama.json`, `config/seed.json`, `config/voice_map.json`, `avatar/models/*` (except its README),
+   `config/ollama.json`, `config/openai_compat.json`, `config/seed.json`, `config/voice_map.json`, `avatar/models/*` (except its README),
    `speech/models/*` (except `DOWNLOAD.md`), `vendor/tts-engine/*` (except `main.py`, `requirements-tts.txt`,
    `README.md`, `LICENSE`, `THIRD_PARTY_NOTICES.md`). After onboarding, `config/build_f.json` and
    `config/word_replace.json` hold the person's name and city: do not commit those changes to a public fork.
@@ -169,6 +169,7 @@ and the interactive map at `/flow`. Socket protocol: [brain/PROTOCOL.md](brain/P
 | `brain/f_memory.py`, `f_method.py`, `f_extract.py`, `methods.py` | evidence memory: quoted facts and original speech (no summaries), hybrid BM25 + embedding recall, extraction schema |
 | `brain/f_roles.py`, `config/llm_roles.json` | the four LLM roles, presets, validated selections |
 | `brain/f_openrouter.py`, `brain/f_ollama.py` | metered OpenRouter / Alibaba transports; the Ollama transport (`config/ollama.json`) |
+| `brain/f_compat.py` | a local OpenAI-compatible server (vLLM, llama.cpp, LM Studio) as a role transport (`config/openai_compat.json`, §5.4): detection, the local-only rule, removal of inline thinking; no API key |
 | `brain/f_usage.py`, `f_settle.py`, `f_controls.py`, `config/pricing.json` | per-call usage ledger (`retire_dead`: requests no running work will finish), cost settlement, model and meter controls, Unlock, the silence-remarks setting |
 | `brain/f_persona.py` | Setup page persona editing and the OpenRouter key endpoint (writes `brain/.env`) |
 | `brain/f_reset.py` | wipe her memory / reset everything (with backups): one short wait (`wait_s`), `force`, the busy reasons in words; `wipe_offline` for `launch.py --wipe-memory` while she is not running |
@@ -579,6 +580,59 @@ to her again` (hints for 401, 402, 403, 404 "no endpoints", 429). The transport 
 `provider_detail` (`f_openrouter.describe_error`); the exception's type and message are unchanged, because memory jobs
 classify failures by them (`f_memory.TRANSIENT_ERROR`, `REJECTED_REQUEST`).
 
+**Another local server (OpenAI-compatible).** A model server of the person's own with `GET {base}/models` and
+`POST {base}/chat/completions`: vLLM, llama.cpp's server, LM Studio. It is the route for models Ollama does not load
+(NVIDIA's NVFP4 checkpoints on vLLM, for one). Setup → Brain → OpenAI-compatible → address → Detect models → Use this
+model. Headless: the two calls above with `compat/detect` (`X-Build-F-Action: compat-detect`,
+`{"base_url": "http://127.0.0.1:8000/v1"}`) and `compat/use` (`compat-use`, the same `model` / `roles` / `force` body).
+Selections read `<role>:compat:<model>`. The model-size rule above applies here too, and so does her ~8k-token
+prompt: unlike Ollama, this transport cannot set the context window, so the server must be started with at least 16k
+(vLLM: `--max-model-len 16384` or more).
+
+- **Local only, and no key.** The address must be plain `http` and must not be a public one: this PC, or a private
+  network. `brain/f_compat.py` checks that when the address is saved and again before every call (`local_address`: a
+  name is looked up each time), and refuses otherwise with `… is a public address; this transport only talks to local
+  servers`. No API key is read, stored or sent, and there is no field or setting for one; a server that answers 401
+  is reported as `the server asks for an API key, and this transport sends none`. Do not add a key or a public
+  address here: hosted providers are the reviewed ones (§5.4 above).
+- Thinking in a separate field is ignored. Inline thinking (`<think>…</think>`, or only `</think>` when the opening
+  tag is in the prompt) is removed before she can speak it (`ThinkFilter`). Where a server honours it,
+  `chat_template_kwargs` (below) turns thinking on or off per model. One that thinks past its answer budget logs
+  `[compat] … used its whole answer budget thinking` and she says nothing, so prefer a model with thinking off for
+  `surface` and `deep`.
+- These calls are booked at zero cost and with no cache share, as Ollama's are. Tokens are zero when the server
+  reports no usage. Receipts go to `memory_f/compat_receipts/`.
+- The first-run wizard on the Use page offers OpenRouter and Ollama only; this one is set on the Setup page (the
+  wizard's brain step can be skipped).
+
+**One entry per model and server.** `models` in `config/openai_compat.json` is a list of entries, and each role selects
+one by `name` (`<role>:compat:<name>`). An entry may also carry these optional fields, so different roles can use
+different servers or settings. An entry with only `name` runs on the file's top-level server as the server names it:
+
+| Field | Meaning |
+| --- | --- |
+| `served_name` | the name the server knows the model by, when `name` is your own label. List one served model twice with different options by giving the two entries different `name`s and the same `served_name`. |
+| `base_url` | this entry's server, under the same local-only rule; without it, the file's top-level `base_url`. No path means `/v1`. |
+| `chat_template_kwargs` | sent as-is in each request for this entry only, for example `{"enable_thinking": false}`. Which keys a server honours is up to it. |
+| `thinking_tokens` | added to the role's answer budget for this entry; 0 means none. |
+
+```json
+{"base_url": "http://127.0.0.1:8000/v1", "models": [
+  {"name": "small-fast", "base_url": "http://127.0.0.1:8001/v1"},
+  {"name": "big", "served_name": "Big-Model",
+   "chat_template_kwargs": {"enable_thinking": false}},
+  {"name": "big-think", "served_name": "Big-Model",
+   "chat_template_kwargs": {"enable_thinking": true}, "thinking_tokens": 2048}]}
+```
+
+That is the usual way to let only the reflection think on one served model: `surface`, `deep` and `memory_write`
+select `big`, `reflection` selects `big-think`.
+
+An entry with a malformed field, or an address that is not local, is not offered and the brain logs why. Detect models
+refreshes the plain entries from the server and keeps every entry that has more than a `name`; re-point the page at
+another server and the entries without their own `base_url` follow it. If a server is down, only the roles selecting
+its entries fail: pre-flight and the Use page check each server the roles use.
+
 ### 5.5 Check, then start
 
 ```powershell
@@ -733,7 +787,7 @@ the shipped chat-abbreviation rules at the end, `tts_keep_caps`: capitalised wor
 `tools.json` (git-ignored; MCP servers, the helpers' URLs, keys and `autostart`, policies, `clerk_role`,
 `iot_disclaimer`; template `tools.example.json`; §8.1),
 `messengers.json` (git-ignored; bot tokens and allow-lists; template `messengers.example.json`), `ollama.json`
-(git-ignored), `voice_map.json` (git-ignored; voice adapter edits).
+(git-ignored), `openai_compat.json` (git-ignored; §5.4), `voice_map.json` (git-ignored; voice adapter edits).
 
 ## 7. The page
 
@@ -1159,6 +1213,17 @@ each entry below was checked against the code):
   has none of its own and the brain builds its zone at import: run the setup again, or `<python> -m pip install
   tzdata` (it is in `brain/requirements.txt`). `-- her clock  build_f.json timezone 'X' is not a time zone (…) — the
   brain falls back to Asia/Tokyo` → only the name is wrong: the wizard on the Use page sets it again.
+- `!! LLM server  not answering at …` → start the model server, or fix its address on Setup → Brain; she cannot
+  answer until then (the brain row says so), and Setup → Brain → OpenRouter → *Switch back to the OpenRouter preset*
+  takes her off it. While she runs, each turn then ends with `Your model server: nothing answers at … — is it
+  running?` in her chat, the header light shows `LLM server  not answering at …`, and memory work waits and is tried
+  again. `!! LLM model X  not listed by the server` → load that model on the server. `!! LLM server  …
+  asks for an API key (HTTP 401), and none is ever sent` → start the server without a key. `!! LLM server  … is a
+  public address` / `is not a plain http address` → this transport is for a server on this PC or the person's own
+  network (§5.4).
+- On an OpenAI-compatible server her replies are cut off or she forgets the start of her instructions → the server's
+  context is under 16k tokens (§5.4). She says nothing and `logs/brain.log` has `[compat] … used its whole answer
+  budget thinking` → the model thinks too long for that role: turn its thinking off on the server or pick another.
 - `OK brain port|web/speech port|…  N held by this OpenAmika (running)` → she is running from this folder: fine.
   `!! brain port|…|messengers port  N is in use by pid P (name)` → another program (or another OpenAmika checkout,
   which uses the same default ports) holds the port: stop it, or give one of them other ports in `settings.json`

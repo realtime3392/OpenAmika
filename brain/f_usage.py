@@ -206,9 +206,10 @@ def normalize_usage(provider: str, usage: dict | None, model: str = "") -> dict:
         details = raw.get("completion_tokens_details") or {}
         tokens["reasoning_tokens"] = count("reasoning_tokens", details if isinstance(details, dict) else {})
         # OpenAI-compatible completion_tokens already includes reasoning tokens.
-    elif provider == "ollama":
+    elif provider in {"ollama", "openai_compat"}:
         # Ollama's counts (f_ollama maps prompt_eval_count / eval_count onto prompt_tokens / completion_tokens).
         # Ollama reuses its own KV cache but never reports how much: these calls have no cache share.
+        # f_compat passes only prompt_tokens / completion_tokens, since its servers disagree on the cache figures.
         prompt_key = "prompt_tokens" if "prompt_tokens" in raw else "prompt_eval_count"
         output_key = "completion_tokens" if "completion_tokens" in raw else "eval_count"
         tokens["input_uncached_tokens"] = count(prompt_key, required=True)

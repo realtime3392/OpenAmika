@@ -746,6 +746,39 @@ async def build_f_ollama_use(request: Request):
     return await _build_f_control(request, "/api/build_f/ollama/use", "ollama-use", ("ok", "selections", "transport", "in_use"))
 
 
+# ── a local OpenAI-compatible server, detected on the brain (config/openai_compat.json) ──
+_COMPAT_FIELDS = ("ok", "base_url", "models", "detected_at", "reachable", "error", "in_use", "servers")
+
+
+@app.get("/api/build_f/compat")
+async def build_f_compat():
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as client:
+            async with client.get(HANE_URL.rstrip("/") + "/api/build_f/compat", allow_redirects=False) as response:
+                if response.status != 200:
+                    raise HTTPException(status_code=503, detail="Server status is unavailable.")
+                payload = await response.json()
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            raise ValueError("Unexpected server status")
+        return {key: payload.get(key) for key in _COMPAT_FIELDS}
+    except HTTPException:
+        raise
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        raise HTTPException(status_code=503, detail="Server status is unavailable (is the brain running?).") from None
+
+
+@app.post("/api/build_f/compat/detect")
+async def build_f_compat_detect(request: Request):
+    """Probe the server and record its models; touches no conversation state, so it may run while she talks."""
+    return await _build_f_control(request, "/api/build_f/compat/detect", "compat-detect", _COMPAT_FIELDS,
+                                  check_busy=False, timeout=60)
+
+
+@app.post("/api/build_f/compat/use")
+async def build_f_compat_use(request: Request):
+    return await _build_f_control(request, "/api/build_f/compat/use", "compat-use", ("ok", "selections", "transport", "in_use"))
+
+
 @app.post("/api/build_f/preset")
 async def build_f_preset(request: Request):
     """Apply a tested preset by name, or the first validated preset of a provider ({"provider": "openrouter"})."""

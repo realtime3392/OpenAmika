@@ -36,6 +36,7 @@
     <div class="prov-switch" id="provSwitch" style="margin:12px 0;">
       <button type="button" class="prov" id="provOpenrouter" data-prov="openrouter"><b>OpenRouter</b><span>recommended · her tested models · a few dollars a month</span></button>
       <button type="button" class="prov" id="provOllama" data-prov="ollama"><b>Ollama</b><span>fully local · a 27B+ model · a 32 GB GPU or a second PC</span></button>
+      <button type="button" class="prov" id="provCompat" data-prov="compat"><b>OpenAI-compatible</b><span>fully local · vLLM, llama.cpp or LM Studio · no key</span></button>
     </div>
     <p class="card-hint" id="modelBusyNote" hidden style="margin:0 0 12px;"></p>
     <div id="orPanel">
@@ -79,6 +80,32 @@
         Thinking is off for speed except in the reflection role; the context window is set to 16k so her prompts fit.
         Her memory search already runs locally — with Ollama, nothing leaves your computer. In
         <b>Professional</b> mode you can mix: a local model for some roles, OpenRouter for others.
+      </p>
+    </div>
+    <div id="compatPanel" hidden>
+      <div class="form-row" style="margin-bottom:8px;">
+        <div class="field" style="flex:2"><label>Server address</label>
+          <input type="text" id="compatUrl" placeholder="http://127.0.0.1:1234/v1" autocomplete="off"></div>
+        <button class="btn small" id="compatDetect">Detect models</button>
+        <span class="card-hint" id="compatStatus">checking…</span>
+      </div>
+      <div class="form-row" style="margin-bottom:8px;">
+        <div class="field" style="flex:2"><label>Model for all four roles</label><select id="compatModel"></select></div>
+        <button class="btn small primary" id="compatUse">Use this model</button>
+        <span class="card-hint" id="compatNote"></span>
+      </div>
+      <p class="card-hint">
+        A model server of your own with OpenAI's <code>/v1/chat/completions</code> and <code>/v1/models</code>: vLLM
+        (<code>http://127.0.0.1:8000/v1</code>), llama.cpp's server (<code>http://127.0.0.1:8080/v1</code>), LM Studio
+        (<code>http://127.0.0.1:1234/v1</code>). <b>Local only:</b> the address must be plain <code>http</code> on this
+        PC or your own network, and no API key is sent. A public address is refused.
+      </p>
+      <p class="card-hint">
+        <b>The model's size matters as much as on Ollama:</b> below 27B parameters she loses her character and breaks her
+        reply format. Load it with a context of at least 16k tokens: her prompts are about 8k, and many servers default
+        to less and cut them silently. A model that thinks at length can use up its whole answer and say nothing, so
+        prefer one with thinking turned off for her surface and deep roles. Nothing is charged for these models, and
+        her cost tile shows them at zero.
       </p>
     </div>
     <div data-pro>

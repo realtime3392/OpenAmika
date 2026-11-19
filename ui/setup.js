@@ -188,13 +188,16 @@
     }));
     // where she thinks: the provider switch reflects the live selection (mixed = both panels apply)
     const kinds = new Set(ROLES.map((role) => { const item = optionList(role).find((o) => o.key === selections[role]); return item ? item.transport : "openrouter"; }));
-    const onOllama = kinds.has("ollama"), onCloud = kinds.has("openrouter") || kinds.has("alibaba") || kinds.has("native");
+    const onOllama = kinds.has("ollama"), onCompat = kinds.has("openai_compat"), onCloud = kinds.has("openrouter") || kinds.has("alibaba") || kinds.has("native");
     $("provOpenrouter").classList.toggle("active", onCloud);
     $("provOllama").classList.toggle("active", onOllama);
-    $("provOpenrouter").querySelector("span").textContent = onCloud && !onOllama ? "in use · recommended · her tested models" : "recommended · her tested models · a few dollars a month";
-    $("provOllama").querySelector("span").textContent = onOllama && !onCloud ? "in use · fully local · a 27B+ model" : "fully local · a 27B+ model · a 32 GB GPU or a second PC";
-    $("orBackNote").hidden = !onOllama;
-    if (!provChosen) showProvider(onOllama && !onCloud ? "ollama" : "openrouter");
+    $("provCompat").classList.toggle("active", onCompat);
+    $("provOpenrouter").querySelector("span").textContent = onCloud && !onOllama && !onCompat ? "in use · recommended · her tested models" : "recommended · her tested models · a few dollars a month";
+    $("provOllama").querySelector("span").textContent = onOllama && !onCloud && !onCompat ? "in use · fully local · a 27B+ model" : "fully local · a 27B+ model · a 32 GB GPU or a second PC";
+    $("provCompat").querySelector("span").textContent = onCompat && !onCloud && !onOllama ? "in use · fully local · your own server" : "fully local · vLLM, llama.cpp or LM Studio · no key";
+    $("orBackNote").hidden = !onOllama && !onCompat;
+    $("orBackNote").firstChild.textContent = onCompat && !onOllama ? "She is on your own model server right now. " : onCompat ? "She is on local models right now. " : "She is on Ollama right now. ";
+    if (!provChosen) showProvider(onCompat && !onCloud ? "compat" : onOllama && !onCloud ? "ollama" : "openrouter");
     if (kinds.has("openrouter")) loadCatalog(); else $("orGoneNote").hidden = true;
 
     const grid = $("roleGrid");
@@ -218,6 +221,7 @@
       grid.append(el("div", { class: "field" }, el("label", { text: ROLE_LABELS[role] || role }), select, description));
     }
     loadOllama();
+    loadCompat();
     const presets = $("presetSelect");
     presets.replaceChildren(...(Array.isArray(modelData.presets) ? modelData.presets : []).map((p) => {
       const name = (p && p.name) || String(p);
@@ -233,11 +237,14 @@
   function showProvider(which) {
     $("orPanel").hidden = which !== "openrouter";
     $("ollamaPanel").hidden = which !== "ollama";
+    $("compatPanel").hidden = which !== "compat";
     $("provOpenrouter").setAttribute("aria-pressed", String(which === "openrouter"));
     $("provOllama").setAttribute("aria-pressed", String(which === "ollama"));
+    $("provCompat").setAttribute("aria-pressed", String(which === "compat"));
   }
   $("provOpenrouter").addEventListener("click", () => { provChosen = true; showProvider("openrouter"); });
   $("provOllama").addEventListener("click", () => { provChosen = true; showProvider("ollama"); loadOllama(); });
+  $("provCompat").addEventListener("click", () => { provChosen = true; showProvider("compat"); loadCompat(); });
 
   // A model switch refused as busy (409, e.g. after a local model crashed mid-answer) shows what runs and an Unlock
   // button: Unlock stops what she is doing and clears what a crash left behind, then the same switch goes again with
@@ -347,6 +354,54 @@
       toast("She now thinks locally on " + model + " — fully local." + (r.transport === "ollama" ? "" : " (" + r.transport + ")") +
             (warning ? " " + warning : ""), !!warning);
       loadModels(); loadOllama();
+    });
+  });
+
+  // ── a local OpenAI-compatible server (no key; the brain refuses an address that is not local) ──
+  async function loadCompat() {
+    let info;
+    try {
+      info = await getJSON("/api/build_f/compat");
+    } catch (error) {
+      $("compatStatus").textContent = "status unavailable: " + (error.message || error);
+      return;
+    }
+    if (!$("compatUrl").value.trim()) $("compatUrl").value = info.base_url || "";
+    const models = info.models || [];
+    $("compatStatus").textContent = info.reachable
+      ? "Answering · " + (models.length ? models.length + " model(s) detected" : "no models detected yet — press Detect")
+      : (info.error ? info.base_url + " cannot be used: " + info.error : "not answering at " + info.base_url)
+        + (models.length ? " (" + models.length + " model(s) remembered)" : "");
+    const inUse = info.in_use || {};
+    const current = inUse.deep || inUse.surface || "";
+    const select = $("compatModel");
+    select.replaceChildren(...(models.length ? models.map((m) => el("option", { value: m.name, text: m.name }))
+                                             : [el("option", { value: "", text: "— detect models first —" })]));
+    if (current) select.value = current;
+    $("compatUse").disabled = !models.length;
+    const roles = Object.keys(inUse);
+    $("compatNote").textContent = (info.servers || []).length > 1 ? "The roles run on " + info.servers.length + " servers."
+      : roles.length === 4 ? "All four roles run on this server."
+      : roles.length ? "On this server: " + roles.join(", ") + "." : "";
+  }
+  $("compatDetect").addEventListener("click", async () => {
+    $("compatDetect").disabled = true;
+    $("compatStatus").textContent = "asking the server…";
+    try {
+      const r = await postAction("/api/build_f/compat/detect", "compat-detect", { base_url: $("compatUrl").value.trim() });
+      const n = (r.models || []).length;
+      toast(n ? n + " model(s) detected — pick one and press Use this model." : "The server answered, but lists no chat models: load one first.", !n);
+      await loadCompat();
+      loadModels();   // the role grid now offers these models too
+    } catch (error) { $("compatStatus").textContent = String(error.message || error); toast(String(error.message || error), true); }
+    finally { $("compatDetect").disabled = false; }
+  });
+  $("compatUse").addEventListener("click", () => {
+    const model = $("compatModel").value;
+    if (!model) { toast("Detect models first.", true); return; }
+    switchModels("/api/build_f/compat/use", "compat-use", { model }, () => {
+      toast("She now thinks locally on " + model + ", on your own server.");
+      loadModels(); loadCompat();
     });
   });
 
