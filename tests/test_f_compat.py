@@ -1,7 +1,8 @@
-"""A local OpenAI-compatible server as a role transport (f_compat + the role manager's generated options). Offline:
+"""An OpenAI-compatible server as a role transport (f_compat + the role manager's generated options). Offline:
 the real HTTP in here goes to stand-in servers on the loopback."""
 import contextlib
 import json
+import os
 import shutil
 import socket
 import sys
@@ -19,8 +20,9 @@ sys.path.insert(0, str(ROOT / "tests"))
 from _llm_stub import LlmStub, unused_url                           # noqa: E402
 import f_compat                                                     # noqa: E402
 import f_memory                                                     # noqa: E402
-from f_compat import (COMPAT, CompatClient, ThinkFilter, compat_base_url, compat_role_config,   # noqa: E402
-                      discover, load_compat_config, local_address, save_compat_config, strip_thinking)
+from f_compat import (COMPAT, KEY_ENV, CompatClient, ThinkFilter, compat_base_url, compat_role_config,   # noqa: E402
+                      discover, load_compat_config, local_address, save_compat_config, save_key, saved_key,
+                      strip_thinking)
 from f_memory import MemoryRuntime                                   # noqa: E402
 from f_openrouter import describe_error                              # noqa: E402
 from f_roles import NATIVE_KEYS, ROLES, install_roles                # noqa: E402
@@ -94,13 +96,15 @@ class AddressTests(unittest.TestCase):
         with resolves_to("192.168.1.20"):
             self.assertEqual(local_address("http://box:8000/v1"), ["192.168.1.20"])
 
-    def test_a_public_address_and_https_are_refused(self):
+    def test_plain_http_is_for_local_servers_and_anything_else_needs_https(self):
         for url in ("http://8.8.8.8:8000/v1", "http://[2001:4860:4860::8888]/v1"):
-            with self.assertRaisesRegex(ValueError, "is a public address"):
+            with self.assertRaisesRegex(ValueError, "is a public address; plain http is for local servers only: use https"):
                 compat_base_url(url)
-        for url in ("https://api.example.com/v1", "https://127.0.0.1:8000/v1"):
-            with self.assertRaisesRegex(ValueError, "plain http"):
-                compat_base_url(url)
+        for url in ("https://api.example.com/v1", "https://8.8.8.8/v1", "https://127.0.0.1:8000/v1"):
+            self.assertEqual(compat_base_url(url), url)
+        self.assertEqual(compat_base_url("https://api.example.com"), "https://api.example.com/v1")
+        with patch.object(f_compat.socket, "getaddrinfo", side_effect=AssertionError("an https name is not looked up")):
+            self.assertEqual(local_address("https://api.example.com/v1"), [])
 
     def test_a_name_is_judged_by_what_it_stands_for(self):
         self.assertEqual(compat_base_url("http://models.example.com/v1"), "http://models.example.com/v1")
@@ -146,9 +150,10 @@ class ClientTests(unittest.TestCase):
         f_compat._QUIRKS.clear()
         self.client = self.make(BASE)
 
-    def make(self, base_url):
+    def make(self, base_url, api_key=""):
         return CompatClient(self.http, lambda request: self.handles.append(request) or "h1",
-                            lambda handle, receipt: self.receipts.append((handle, receipt)), base_url=base_url)
+                            lambda handle, receipt: self.receipts.append((handle, receipt)), base_url=base_url,
+                            api_key=api_key)
 
     def test_stream_settles_complete_despite_another_model_name(self):
         cfg = compat_role_config(SERVER, "local-model", "deep")
@@ -211,16 +216,26 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(Exception) as caught:
             list(self.client.stream(cfg, [{"role": "user", "content": "u"}]))
         self.assertEqual(describe_error(caught.exception),
-                         "Your model server: HTTP 401: it asks for an API key, and none is ever sent: start it without one")
+                         "Your model server: HTTP 401: it asks for an API key: enter it on Setup → Brain")
+        keyed = self.make(BASE, api_key="sk-secret")
+        self.http.responses = [Response(status=401, data={"error": {"message": "bad key sk-secret"}})]
+        with self.assertRaises(Exception) as caught:
+            list(keyed.stream(cfg, [{"role": "user", "content": "u"}]))
+        self.assertEqual(describe_error(caught.exception),
+                         "Your model server: HTTP 401: it refused the API key: enter a new one on Setup → Brain")
+        self.assertNotIn("sk-secret", str(caught.exception))     # a server that echoes the key does not get it logged
 
-    def test_no_request_ever_carries_a_key(self):
+    def test_a_key_is_sent_only_by_a_client_that_was_given_one(self):
         cfg = compat_role_config(SERVER, "local-model", "surface")
-        self.http.responses = [Response(lines=sse("status: ok")), Response(data={"data": [{"id": "m"}]})]
-        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-from-the-environment", "OPENAI_COMPAT_API_KEY": "sk-other"}):
+        self.http.responses = [Response(lines=sse("status: ok")), Response(data={"data": [{"id": "m"}]}),
+                               Response(lines=sse("status: ok"))]
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-from-the-environment", KEY_ENV: "sk-other"}):
             list(self.client.stream(cfg, [{"role": "user", "content": "u"}]))
             discover(self.http, BASE)
-        for _, _, kwargs in self.http.calls:
-            self.assertNotIn("authorization", {name.lower() for name in kwargs["headers"]})
+            list(self.make(BASE, api_key="sk-secret").stream(cfg, [{"role": "user", "content": "u"}]))
+        sent = [kwargs["headers"].get("Authorization") for _, _, kwargs in self.http.calls]
+        self.assertEqual(sent, [None, None, "Bearer sk-secret"])   # a key in the environment alone goes nowhere
+        self.assertFalse(self.http.calls[2][2]["allow_redirects"])
 
     def test_a_name_that_has_come_to_stand_for_a_public_address_is_not_called(self):
         client = self.make("http://models.example.com/v1")
@@ -233,6 +248,15 @@ class ClientTests(unittest.TestCase):
                 list(client.stream(cfg, [{"role": "user", "content": "u"}]))
         self.assertEqual(len(self.http.calls), 1)            # the second turn never left this machine
         self.assertNotEqual(self.receipts[1][1]["status"], "complete")
+
+    def test_an_https_server_is_booked_at_zero_and_marked_unreported(self):
+        cfg = compat_role_config(SERVER, "local-model", "surface")
+        self.http.responses = [Response(lines=sse("status: ok")), Response(lines=sse("status: ok"))]
+        list(self.client.stream(cfg, [{"role": "user", "content": "u"}]))
+        list(self.make("https://api.example.com/v1", "sk-secret").stream(cfg, [{"role": "user", "content": "u"}]))
+        self.assertEqual([(r["cost_usd"], r["usage"]["cost_source"]) for _, r in self.receipts],
+                         [(0.0, "local"), (0.0, "unreported")])
+        self.assertEqual(self.http.calls[1][0], "https://api.example.com/v1/chat/completions")
 
     def test_a_redirect_is_an_error(self):
         cfg = compat_role_config(SERVER, "local-model", "surface")
@@ -251,15 +275,31 @@ class DiscoverTests(unittest.TestCase):
     def test_a_server_that_wants_a_key_is_told_apart_from_one_that_is_down(self):
         http = HTTP()
         http.responses = [Response(status=401, data={})]
-        with self.assertRaisesRegex(Exception, "asks for an API key, and this transport sends none"):
+        with self.assertRaisesRegex(Exception, "asks for an API key: enter it with the address"):
             discover(http, BASE)
+        http.responses = [Response(status=401, data={})]
+        with self.assertRaisesRegex(Exception, "refused the API key"):
+            discover(http, BASE, "k")
 
-    def test_a_public_address_is_not_asked(self):
+    def test_a_public_address_is_not_asked_over_plain_http(self):
         http = HTTP()
         with resolves_to("8.8.4.4"):
-            with self.assertRaisesRegex(Exception, "only talks to local servers"):
-                discover(http, "http://models.example.com/v1")
+            with self.assertRaisesRegex(Exception, "plain http is for local servers only"):
+                discover(http, "http://models.example.com/v1", "sk-secret")
         self.assertEqual(http.calls, [])
+
+    def test_the_key_goes_only_to_the_address_it_was_entered_for(self):
+        self.addCleanup(os.environ.pop, KEY_ENV, None)
+        with tempfile.TemporaryDirectory() as tmp:
+            env = Path(tmp) / ".env"
+            env.write_text("OPENROUTER_API_KEY=keep\n", encoding="utf-8")
+            save_key(env, "first")
+            save_key(env, "second")
+            self.assertEqual(env.read_text(encoding="utf-8").splitlines(), ["OPENROUTER_API_KEY=keep", KEY_ENV + "=second"])
+        self.assertEqual(saved_key({"base_url": BASE, "key_base_url": BASE}), "second")
+        self.assertEqual(saved_key({"base_url": "https://elsewhere.example/v1", "key_base_url": BASE}), "")
+        self.assertEqual(saved_key({"base_url": BASE, "key_base_url": None}), "")
+        self.assertEqual(saved_key({"base_url": BASE, "key_base_url": BASE}, "http://box:8610/v1"), "")   # an entry's own server
 
     def test_config_defaults_and_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -268,14 +308,17 @@ class DiscoverTests(unittest.TestCase):
             self.assertEqual((load_compat_config(root)["base_url"], load_compat_config(root)["models"]), (BASE, []))
             save_compat_config(root, dict(SERVER, detected_at="t"))
             self.assertEqual(load_compat_config(root)["models"], [{"name": "local-model"}])
-            save_compat_config(root, dict(SERVER, base_url="https://api.example.com/v1"))
-            self.assertEqual(load_compat_config(root)["base_url"], BASE)      # a hand-written address that is not local
+            save_compat_config(root, dict(SERVER, base_url="http://8.8.8.8/v1"))
+            self.assertEqual(load_compat_config(root)["base_url"], BASE)      # a hand-written public address over plain http
 
 
 class RouteTests(unittest.TestCase):
-    """The page's detect route: only a local address is asked or saved, and there is no key to give it."""
+    """The page's detect route: plain http only for a local address; a key is saved, never returned, and follows
+    the address it was entered for."""
     def setUp(self):
         from flask import Flask, jsonify, request
+        self.addCleanup(os.environ.pop, KEY_ENV, None)
+        os.environ.pop(KEY_ENV, None)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
@@ -293,26 +336,53 @@ class RouteTests(unittest.TestCase):
         return self.web.post("/api/build_f/compat/detect", json=dict(extra, base_url=base),
                              headers={"X-Build-F-Action": "compat-detect"})
 
-    def test_a_detect_saves_the_address_and_its_models_and_nothing_else(self):
-        reply = self.detect(BASE, api_key="sk-secret")           # a key in the request is not a field: it is dropped
+    def sent(self):
+        return self.http.calls[-1][2]["headers"].get("Authorization")
+
+    def test_a_detect_without_a_key_saves_the_address_and_its_models_and_no_key(self):
+        reply = self.detect(BASE)
         self.assertEqual(reply.status_code, 200)
-        self.assertEqual(sorted(reply.get_json()), ["base_url", "detected_at", "error", "in_use", "models", "ok", "reachable"])
+        self.assertFalse(reply.get_json()["key_saved"])
         saved = json.loads((self.root / "config" / f_compat.CONFIG_NAME).read_text(encoding="utf-8"))
-        self.assertEqual((saved["base_url"], saved["models"]), (BASE, [{"name": "m1"}]))
-        self.assertEqual(sorted(saved), ["base_url", "detected_at", "models"])
+        self.assertEqual((saved["base_url"], saved["key_base_url"], saved["models"]), (BASE, None, [{"name": "m1"}]))
         self.assertFalse((self.root / "brain" / ".env").exists())
         self.assertEqual(self.http.calls[-1][2]["headers"], {})
 
-    def test_a_public_address_is_refused_before_anything_is_asked_or_saved(self):
-        for base in ("http://8.8.8.8:8000/v1", "https://api.example.com/v1"):
-            reply = self.detect(base)
-            self.assertEqual(reply.status_code, 400, base)
-        with resolves_to("8.8.4.4"):
-            reply = self.detect("http://models.example.com/v1")
+    def test_the_key_follows_its_address(self):
+        reply = self.detect(BASE, api_key="sk-secret")
+        self.assertTrue(reply.get_json()["key_saved"])
+        self.assertNotIn("sk-secret", reply.get_data(as_text=True))
+        self.assertNotIn("sk-secret", (self.root / "config" / f_compat.CONFIG_NAME).read_text(encoding="utf-8"))
+        self.assertIn(KEY_ENV + "=sk-secret", (self.root / "brain" / ".env").read_text(encoding="utf-8"))
+        self.assertEqual(self.sent(), "Bearer sk-secret")
+        self.assertFalse(self.detect("https://other.example/v1").get_json()["key_saved"])
+        self.assertIsNone(self.sent())                                   # another address: the saved key stays home
+        self.assertNotIn("sk-secret", self.web.get("/api/build_f/compat").get_data(as_text=True))
+        self.assertTrue(self.detect(BASE).get_json()["key_saved"])       # back at its own address
+        self.assertEqual(self.sent(), "Bearer sk-secret")
+
+    def test_a_key_the_server_refuses_is_not_saved(self):
+        self.http.responses = [Response(status=401, data={"error": {"message": "bad key sk-wrong"}})]
+        reply = self.web.post("/api/build_f/compat/detect", json={"base_url": BASE, "api_key": "sk-wrong"},
+                              headers={"X-Build-F-Action": "compat-detect"})
+        self.assertEqual(reply.status_code, 503)
+        self.assertIn("refused the API key", reply.get_json()["error"])
+        self.assertNotIn("sk-wrong", reply.get_data(as_text=True))
+        self.assertFalse((self.root / "brain" / ".env").exists())
+        self.assertFalse((self.root / "config" / f_compat.CONFIG_NAME).exists())
+        self.assertEqual(self.detect(BASE, api_key="has space").status_code, 400)
+
+    def test_a_public_address_over_plain_http_is_refused_before_anything_is_asked_or_saved(self):
+        reply = self.detect("http://8.8.8.8:8000/v1", api_key="sk-secret")
         self.assertEqual(reply.status_code, 400)
-        self.assertIn("only talks to local servers", reply.get_json()["error"])
+        with resolves_to("8.8.4.4"):
+            reply = self.detect("http://models.example.com/v1", api_key="sk-secret")
+        self.assertEqual(reply.status_code, 400)
+        self.assertIn("plain http is for local servers only: use https", reply.get_json()["error"])
         self.assertEqual(self.http.calls, [])
         self.assertFalse((self.root / "config" / f_compat.CONFIG_NAME).exists())
+        self.assertFalse((self.root / "brain" / ".env").exists())
+        self.assertEqual(self.detect("https://api.example.com/v1").status_code, 200)      # https may be anywhere
 
     def test_a_detect_keeps_hand_written_entries_and_refreshes_the_rest(self):
         save_compat_config(self.root, {"base_url": BASE, "models": [
@@ -333,7 +403,7 @@ class RouteTests(unittest.TestCase):
         self.http.responses = [Response(status=401, data={})]
         reply = self.web.post("/api/build_f/compat/detect", json={"base_url": BASE}, headers={"X-Build-F-Action": "compat-detect"})
         self.assertEqual(reply.status_code, 503)
-        self.assertIn("asks for an API key, and this transport sends none", reply.get_json()["error"])
+        self.assertIn("asks for an API key: enter it with the address", reply.get_json()["error"])
         self.http.responses = []                                 # the fake raises: nothing is listening
         reply = self.web.post("/api/build_f/compat/detect", json={"base_url": BASE}, headers={"X-Build-F-Action": "compat-detect"})
         self.assertEqual((reply.status_code, reply.get_json()["error"]),
@@ -420,7 +490,7 @@ class PerEntryTests(unittest.TestCase):
 
     def test_a_plain_config_is_one_server_and_its_models(self):
         old = {"base_url": BASE, "detected_at": "t", "models": [{"name": "local-model"}]}
-        self.assertEqual(self.loaded(old), old)
+        self.assertEqual(self.loaded(old), dict(old, key_base_url=None))
         cfg = compat_role_config(old, "local-model", "reflection")
         self.assertEqual((cfg["api_model"], cfg["base_url"]), ("local-model", BASE))
         self.assertNotIn("chat_template_kwargs", cfg)
@@ -494,8 +564,8 @@ class TwoServersEndToEnd(unittest.TestCase):
         self.manager.set({"surface": "surface:compat:fast", "deep": "deep:compat:big-off",
                           "reflection": "reflection:compat:big-on", "memory_write": "memory_write:compat:big-on"})
 
-    def config(self, *, big_url=None):
-        save_compat_config(self.root, {"base_url": self.fast.url, "detected_at": "t", "models": [
+    def config(self, *, big_url=None, key_base_url=None):
+        save_compat_config(self.root, {"base_url": self.fast.url, "key_base_url": key_base_url, "detected_at": "t", "models": [
             {"name": "fast"},
             {"name": "big-on", "served_name": "big", "base_url": big_url or self.big.url,
              "chat_template_kwargs": {"enable_thinking": True}, "thinking_tokens": 2048},
@@ -521,8 +591,8 @@ class TwoServersEndToEnd(unittest.TestCase):
         self.assertEqual(reflection["body"]["max_tokens"], f_compat.ANSWER_TOKENS["reflection"] + 2048)
         self.assertEqual(self.meter.summary()["active_requests"], 0)
 
-    def test_no_server_is_ever_sent_a_key(self):
-        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-from-the-environment", "OPENAI_COMPAT_API_KEY": "sk-other"}):
+    def test_a_key_that_is_bound_to_no_address_reaches_no_server(self):
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-from-the-environment", KEY_ENV: "sk-other"}):
             self.turn("surface", "fast")
             self.turn("deep", "big-off")
             self.g["F_ROLE_COMPLETE"]("reflection", [{"role": "user", "content": "u"}])
@@ -530,6 +600,22 @@ class TwoServersEndToEnd(unittest.TestCase):
         seen = self.fast.requests + self.big.requests
         self.assertGreaterEqual(len(seen), 5)
         self.assertEqual({r["auth"] for r in seen}, {None})
+
+    def test_the_key_reaches_only_its_bound_address(self):
+        with patch.dict("os.environ", {KEY_ENV: "sk-secret"}):
+            self.config(key_base_url=self.fast.url)
+            self.manager.reload_compat()
+            self.turn("surface", "fast")
+            self.turn("deep", "big-off")
+            self.web.get("/api/build_f/compat")
+            self.assertEqual({r["auth"] for r in self.fast.requests}, {"Bearer sk-secret"})
+            self.assertEqual({r["auth"] for r in self.big.requests}, {None})
+            self.config(key_base_url=self.big.url)
+            self.manager.reload_compat()
+            self.turn("surface", "fast")
+            self.turn("deep", "big-off")
+            self.assertIsNone(self.fast.chats()[1]["auth"])
+            self.assertEqual(self.big.chats()[1]["auth"], "Bearer sk-secret")
 
     def test_these_calls_cost_nothing_and_the_ledger_says_so(self):
         self.turn("surface", "fast")

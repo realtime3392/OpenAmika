@@ -1,13 +1,17 @@
-"""A local OpenAI-compatible chat server as a transport for the four Build F roles.
+"""An OpenAI-compatible chat server as a transport for the four Build F roles.
 
-LM Studio, llama.cpp's server, vLLM, LocalAI: whatever answers ``GET {base}/models`` and
-``POST {base}/chat/completions`` on this machine or on your own network. ``config/openai_compat.json``
-(git-ignored) holds the address and the models found there; f_roles generates one option per model and role
-("<role>:compat:<model>"). Receipts, metering and the drain machinery are the OpenRouter client's.
+LM Studio, llama.cpp's server, vLLM, LocalAI, or a hosted API: whatever answers ``GET {base}/models`` and
+``POST {base}/chat/completions``. ``config/openai_compat.json`` (git-ignored) holds the address and the models
+found there; f_roles generates one option per model and role ("<role>:compat:<model>"). Receipts, metering and
+the drain machinery are the OpenRouter client's.
 
-Local servers only, and no key. The address must be plain http and must not be a public one: that is checked when
-the address is saved and again before every call (``local_address``), so a name that comes to stand for a public
-address is refused too. No API key is read, stored or sent, and there is no setting for one.
+Plain http is for local servers only: such an address must not be a public one, which is checked when it is saved
+and again before every call (``local_address``), so a name that comes to stand for a public address is refused
+too. A server outside your own network needs https.
+
+The API key is optional. It lives in brain/.env (OPENAI_COMPAT_API_KEY) and is sent only to the address it was
+entered for (``key_base_url``): pointing the page at another server, or naming another server in an entry, cannot
+carry a saved key there. Redirects are never followed.
 
 What these servers do not have in common, and how each is handled here:
 
@@ -16,7 +20,8 @@ What these servers do not have in common, and how each is handled here:
   ThinkFilter removes both inline forms before a word can reach her voice.
 - Model names. llama.cpp answers with a file path, so a differing name is recorded and is not an error.
 - Usage. Some servers report none: the call still counts as complete, with zero tokens.
-- Cost. A server of your own charges nothing: the ledger books these calls at zero, as it does Ollama's.
+- Cost. A server of your own charges nothing: the ledger books these calls at zero, as it does Ollama's. The price
+  of an https server is unknown here: its calls are booked at zero too, with the cost source "unreported".
 - JSON mode. LM Studio refuses ``response_format: json_object``, so none is sent; the writer's prompt asks for JSON.
 - Parameters. A 400 naming ``max_completion_tokens`` or ``stream_options`` adapts the request once and is
   remembered per server. A refused request generated nothing, so this is not a retry of a call that ran.
@@ -25,6 +30,7 @@ import contextlib
 import copy
 import ipaddress
 import json
+import os
 import re
 import socket
 import time
@@ -40,10 +46,13 @@ from f_openrouter import (MAX_OUTPUT_TOKENS, OpenRouterClient, OpenRouterError, 
 
 COMPAT = "openai_compat"
 CONFIG_NAME = "openai_compat.json"
+KEY_ENV = "OPENAI_COMPAT_API_KEY"
 DEFAULT_URL = "http://127.0.0.1:1234/v1"       # LM Studio's default; llama.cpp and vLLM differ only in the port
-ADDRESS_NEEDED = "The server address must look like http://127.0.0.1:1234/v1: plain http, no credentials"
+ADDRESS_NEEDED = "The server address must look like http://127.0.0.1:1234/v1 or https://host/v1, with no credentials"
+USE_HTTPS = "plain http is for local servers only: use https for a server outside your own network"
 
-_URL_RE = re.compile(r"^http://[A-Za-z0-9._\-\[\]:]+(?:/[A-Za-z0-9._~\-]+)*$")
+_URL_RE = re.compile(r"^https?://[A-Za-z0-9._\-\[\]:]+(?:/[A-Za-z0-9._~\-]+)*$")
+_KEY_RE = re.compile(r"[\x21-\x7e]{1,1024}")
 _NOT_CHAT_RE = re.compile(r"embed|whisper|tts|dall-e|moderation|rerank", re.I)
 _OPEN_TAGS = ("<think>", "<thinking>", "<reasoning>")
 _CLOSE_RE = re.compile(r"</(?:think|thinking|reasoning)>", re.I)
@@ -54,8 +63,8 @@ _QUIRKS = {}                                   # chat URL -> what its server ref
 
 
 def compat_base_url(url):
-    """http://host[:port][/path], no query or credentials. No path means /v1; a pasted endpoint is trimmed. An
-    address that is a public one as written is refused here; a name is looked up by local_address()."""
+    """http(s)://host[:port][/path], no query or credentials. No path means /v1; a pasted endpoint is trimmed. A
+    plain-http address that is a public one as written is refused here; a name is looked up by local_address()."""
     url = str(url or "").strip().rstrip("/")
     if not url:
         return DEFAULT_URL
@@ -73,16 +82,23 @@ def compat_base_url(url):
         public = ipaddress.ip_address(host).is_global
     except ValueError:
         public = False          # a name: local_address() looks it up when it is saved and before it is used
-    if public:
-        raise ValueError(f"{host} is a public address; this transport only talks to local servers")
+    if public and parts.scheme != "https":
+        raise ValueError(f"{host} is a public address; {USE_HTTPS}")
     return url if parts.path else url + "/v1"
 
 
+def is_local(base_url):
+    """True for a plain-http address: the kind that is only ever a server of the person's own."""
+    return urlsplit(base_url).scheme == "http"
+
+
 def local_address(base_url):
-    """The addresses the server's name stands for right now, none of them on the public internet; ValueError
-    otherwise. Asked when an address is saved and again before every call, because a name can change what it
-    stands for."""
+    """For a plain-http address: the addresses its name stands for right now, none of them on the public internet;
+    ValueError otherwise. Asked when an address is saved and again before every call, because a name can change
+    what it stands for. An https address may be anywhere and is not looked up: []."""
     parts = urlsplit(base_url)
+    if parts.scheme == "https":
+        return []
     host, port = parts.hostname or "", parts.port or 80
     try:
         found = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
@@ -91,7 +107,7 @@ def local_address(base_url):
     addresses = [info[4][0] for info in found]
     for address in addresses:
         if ipaddress.ip_address(address.split("%")[0]).is_global:
-            raise ValueError(f"{host} is a public address ({address}); this transport only talks to local servers")
+            raise ValueError(f"{host} is a public address ({address}); {USE_HTTPS}")
     return addresses
 
 
@@ -149,12 +165,38 @@ def load_compat_config(root):
         base = compat_base_url(doc.get("base_url"))
     except ValueError:
         base = DEFAULT_URL
-    return {"base_url": base, "detected_at": doc.get("detected_at"),
+    bound = doc.get("key_base_url")
+    return {"base_url": base, "key_base_url": bound if isinstance(bound, str) else None,
+            "detected_at": doc.get("detected_at"),
             "models": [m for m in (_model_row(r) for r in (doc.get("models") or [])) if m]}
 
 
 def save_compat_config(root, doc):
     _write(Path(root) / "config" / CONFIG_NAME, doc)
+
+
+def saved_key(compat, base_url=None):
+    """The key from brain/.env, only for the address it was entered for; "" for any other address."""
+    bound = compat.get("key_base_url")
+    if not bound or bound != (base_url or compat.get("base_url")):
+        return ""
+    return os.getenv(KEY_ENV) or ""
+
+
+def save_key(env_path, key):
+    """Write the key into brain/.env, the file every other provider key lives in."""
+    from f_persona import _write_atomic
+    env_path = Path(env_path)
+    lines = env_path.read_text(encoding="utf-8-sig").splitlines() if env_path.is_file() else []
+    entry = f"{KEY_ENV}={key}"
+    for index, line in enumerate(lines):
+        if line.strip().startswith(KEY_ENV + "="):
+            lines[index] = entry
+            break
+    else:
+        lines.append(entry)
+    _write_atomic(env_path, "\n".join(lines) + "\n")
+    os.environ[KEY_ENV] = key
 
 
 def merged_models(current, detected):
@@ -164,8 +206,8 @@ def merged_models(current, detected):
     return sorted(kept + [m for m in detected if m["name"] not in names], key=lambda m: m["name"])
 
 
-def _error_detail(response):
-    """The server's own explanation, closed and bounded."""
+def _error_detail(response, key=""):
+    """The server's own explanation, closed and bounded, with the key removed should a server echo it."""
     detail = ""
     try:
         payload = response.json()
@@ -179,23 +221,26 @@ def _error_detail(response):
         response.close()
     except Exception:
         pass
-    return detail[:240]
+    return (detail.replace(key, "…") if key else detail)[:240]
 
 
-def discover(http, base_url, *, timeout=(3, 15)):
-    """The chat models this server lists: [{name}], sorted. Read-only; raises when it does not answer."""
+def discover(http, base_url, key="", *, timeout=(3, 15)):
+    """The chat models this server lists: [{name}], sorted. Read-only; raises when it does not answer. `key` is
+    the caller's to judge (saved_key): it is sent to this address as given."""
     base = compat_base_url(base_url)
     try:
         local_address(base)
     except ValueError as error:
         raise OpenRouterError(str(error)) from None
-    response = http.get(base + "/models", headers={}, timeout=timeout, allow_redirects=False)
+    headers = {"Authorization": "Bearer " + key} if key else {}
+    response = http.get(base + "/models", headers=headers, timeout=timeout, allow_redirects=False)
     status = getattr(response, "status_code", 200)
     if status in (401, 403):
-        _error_detail(response)
-        raise OpenRouterError("the server asks for an API key, and this transport sends none")
+        _error_detail(response, key)
+        raise OpenRouterError("the server refused the API key" if key else
+                              "the server asks for an API key: enter it with the address")
     if status != 200:
-        detail = _error_detail(response)
+        detail = _error_detail(response, key)
         raise OpenRouterError(f"HTTP {status}" + (f": {detail}" if detail else ""))
     try:
         payload = response.json()
@@ -318,9 +363,13 @@ class CompatClient(OpenRouterClient):
     transport = COMPAT
     provider_name = "Your model server"
 
-    def __init__(self, http, before_call, after_call, *, base_url, timeout=(10, 600), event_sink=None, drainer=None):
-        # The parent insists on a key. This transport has none and sends no Authorization header (_post).
-        super().__init__(http, "local", before_call, after_call, timeout=timeout, event_sink=event_sink, drainer=drainer)
+    def __init__(self, http, before_call, after_call, *, base_url, api_key="", timeout=(10, 600), event_sink=None,
+                 drainer=None):
+        # The parent insists on a key. Most of these servers have none, and then no Authorization header is sent
+        # (_post). The caller passes a key only for the address it was entered for (saved_key).
+        super().__init__(http, api_key or "local", before_call, after_call, timeout=timeout, event_sink=event_sink,
+                         drainer=drainer)
+        self.api_key = api_key or ""
         self.base_url = compat_base_url(base_url)
         self.chat_url = self.base_url + "/chat/completions"
 
@@ -328,7 +377,7 @@ class CompatClient(OpenRouterClient):
         return make_compat_body(config, messages, stream=stream)
 
     def _reservation(self, config, body):
-        return 0.00001        # a positive reservation keeps the budget gate happy; the price is zero
+        return 0.00001        # a positive reservation keeps the budget gate happy; the price is zero or unknown
 
     def _prepare(self, config, body, metadata, url):
         handle, receipt = super()._prepare(config, body, metadata, url)
@@ -343,7 +392,7 @@ class CompatClient(OpenRouterClient):
                   for k in ("prompt_tokens", "completion_tokens")}
         receipt["raw_usage"] = dict(counts, cost=0.0)
         usage = normalize_usage(receipt["raw_usage"], embedding=embedding)
-        usage["cost_source"] = "local"
+        usage["cost_source"] = "local" if is_local(self.base_url) else "unreported"
         return usage
 
     def _settle(self, handle, receipt, started, done, cancelled, error, *, embedding=False, drained=False):
@@ -373,6 +422,8 @@ class CompatClient(OpenRouterClient):
         except ValueError as error:
             raise self._told(OpenRouterError(str(error)), str(error)) from None
         headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = "Bearer " + self.api_key
         for _ in range(3):
             self._adapt(body, url)
             try:
@@ -388,7 +439,7 @@ class CompatClient(OpenRouterClient):
             status = getattr(response, "status_code", 200)
             if status < 300:
                 return response
-            detail = _error_detail(response)
+            detail = _error_detail(response, self.api_key)
             low = detail.lower()
             quirk = None
             if status in (400, 422) and "max_completion_tokens" in low and "max_tokens" in body:
@@ -396,8 +447,10 @@ class CompatClient(OpenRouterClient):
             elif status in (400, 422) and "stream_options" in low and "stream_options" in body:
                 quirk = "no_stream_options"
             if quirk is None:
-                said = ("it asks for an API key, and none is ever sent: start it without one" if status in (401, 403)
-                        else first_line(detail) or "no reason given")
+                said = first_line(detail) or "no reason given"
+                if status in (401, 403):
+                    said = ("it refused the API key: enter a new one on Setup → Brain" if self.api_key else
+                            "it asks for an API key: enter it on Setup → Brain")
                 raise self._told(OpenRouterError(f"The server answered HTTP {status}" + (f": {detail}" if detail else "")),
                                  f"HTTP {status}: {said}")
             _QUIRKS.setdefault(url, set()).add(quirk)
@@ -462,8 +515,8 @@ class CompatClient(OpenRouterClient):
 
 # ------------------------------------------------------------------ brain routes
 def install_compat(g):
-    """GET /api/build_f/compat (address, models, is it up), POST …/compat/detect (probe a local address, save
-    config/openai_compat.json, refresh the role options), POST …/compat/use."""
+    """GET /api/build_f/compat (address, models, is it up, is a key saved: never the key), POST …/compat/detect
+    (probe an address, save config/openai_compat.json and a new key, refresh the role options), POST …/compat/use."""
     app, request, jsonify = g["app"], g["request"], g["jsonify"]
     root = Path(g["__file__"]).resolve().parent.parent
 
@@ -496,12 +549,13 @@ def install_compat(g):
         manager = g.get("F_ROLES")
         compat = manager.compat if manager is not None else load_compat_config(root)
         out = {"ok": True, "base_url": compat["base_url"], "models": compat["models"],
-               "detected_at": compat.get("detected_at"), "reachable": None, "error": None, "in_use": in_use(manager)}
+               "detected_at": compat.get("detected_at"), "key_saved": bool(saved_key(compat)), "reachable": None,
+               "error": None, "in_use": in_use(manager)}
         if probe:
             used, answers = servers_in_use(manager), {}
             for base in dict.fromkeys([compat["base_url"], *used]):
                 try:
-                    discover(g["http_requests"], base, timeout=(2, 4))
+                    discover(g["http_requests"], base, saved_key(compat, base), timeout=(2, 4))
                     answers[base] = (True, None)
                 except OpenRouterError as error:
                     answers[base] = (False, str(error)[:160])     # it answered oddly, or is not asked: say which
@@ -521,15 +575,24 @@ def install_compat(g):
         try:
             value = action_request("compat-detect")
             base = compat_base_url(value.get("base_url"))
-            local_address(base)                 # a public address is refused before anything is asked of it or saved
+            local_address(base)                 # public over plain http: refused before anything is asked or saved
+            new_key = str(value.get("api_key") or "").strip()
+            if new_key and not _KEY_RE.fullmatch(new_key):
+                raise ValueError("That API key has spaces or characters a key cannot contain.")
             current = load_compat_config(root)
+            bound = current.get("key_base_url")
+            key = new_key or saved_key(current, base)     # a saved key goes only to the address it was entered for
             try:
-                models = discover(g["http_requests"], base)
+                models = discover(g["http_requests"], base, key)
             except OpenRouterError as error:
                 return jsonify({"ok": False, "error": f"No usable answer from {base}: {str(error)[:160]}"}), 503
             except Exception:
                 return jsonify({"ok": False, "error": f"Nothing answers at {base} — is the model server running?"}), 503
-            save_compat_config(root, {"base_url": base, "models": merged_models(current["models"], models),
+            if new_key:                         # only a key the server has just accepted is kept, bound to this address
+                save_key(root / "brain" / ".env", new_key)
+                bound = base
+            save_compat_config(root, {"base_url": base, "key_base_url": bound,
+                                      "models": merged_models(current["models"], models),
                                       "detected_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
             manager = g.get("F_ROLES")
             if manager is not None:

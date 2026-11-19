@@ -34,7 +34,7 @@ from f_memory import _write
 from f_openrouter import (ALIBABA, AlibabaClient, OpenRouterClient, alibaba_base_url, alibaba_role_config,
                           embedding_config, load_alibaba_catalog, load_catalog, role_config)
 from f_ollama import OLLAMA, THINKING_ROLES, OllamaClient, load_ollama_config, ollama_role_config
-from f_compat import COMPAT, CompatClient, compat_role_config, load_compat_config
+from f_compat import COMPAT, CompatClient, compat_role_config, is_local, load_compat_config, saved_key
 
 ROLES = ("surface", "deep", "reflection", "memory_write")
 NATIVE_KEYS = {"surface": "grok-4.3-fast", "deep": "claude-5-sonnet",
@@ -194,9 +194,11 @@ class RoleManager:
                 key = f"{role}:compat:{model['name']}"
                 if key in self.options[role]:
                     continue
+                local = is_local(model.get("base_url") or self.compat["base_url"])
                 row = {"key": key, "name": f"{model['name']} (OpenAI-compatible server)", "provider": COMPAT,
                        "model_id": model["name"],
-                       "description": f"Runs on {model.get('base_url') or 'your own server (Setup → Brain)'}. Local: nothing is charged."}
+                       "description": f"Runs on {model.get('base_url') or 'your own server (Setup → Brain)'}. "
+                                      + ("Local: nothing is charged." if local else "Its cost, if any, is not tracked here.")}
                 try:
                     self.options[role][key] = self._option(role, key, row)
                 except ValueError:
@@ -265,7 +267,7 @@ class RoleManager:
 
     def _add_price(self, config):
         if config.get("transport") in (OLLAMA, COMPAT):
-            # Local: nothing is charged. A priced (zero) entry keeps the meter's budget gate satisfied.
+            # Local, or a server whose price is unknown here. A priced (zero) entry keeps the meter's budget gate satisfied.
             self.meter.pricing["models"][config["transport"] + ":" + config["model_id"]] = {
                 "input": 0.0, "output": 0.0, "cache_read": 0.0}
             return
@@ -515,7 +517,9 @@ def install_roles(g, root, memory, meter, scope, local, pricing):
 
     def client(config=None):
         if config is not None and config.get("transport") == COMPAT:
-            return CompatClient(g["http_requests"], before, after, base_url=config["base_url"], event_sink=event_sink)
+            # The key is judged for this request's own address: an entry may name another server.
+            return CompatClient(g["http_requests"], before, after, base_url=config["base_url"],
+                                api_key=saved_key(manager.compat, config["base_url"]), event_sink=event_sink)
         if config is not None and config.get("transport") == OLLAMA:
             return OllamaClient(g["http_requests"], before, after, base_url=config["base_url"], event_sink=event_sink)
         if config is not None and config.get("transport") == ALIBABA:
