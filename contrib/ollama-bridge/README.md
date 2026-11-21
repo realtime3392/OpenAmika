@@ -100,8 +100,11 @@ which wants Python 3.12 and an NVIDIA driver with CUDA 13.
 What was run, on an x86_64 Windows 11 laptop with an RTX PRO 5000 Blackwell eGPU (48 GB, driver 621.14): steps 1 to 3
 as written, from a fresh environment (the install took 5 minutes, 5.6 GB), the model from a local copy. The server
 was ready 143 s after its start with no kernels compiled, and OpenAmika's own Ollama client completed all four roles
-through the bridge, with thinking on and off, and the model stopped generating within a few tokens of a hang-up. A
-whole OpenAmika session was not run against it.
+through the bridge, with thinking on and off, and the model stopped generating within a few tokens of a hang-up.
+A whole session was run too, on the same laptop: OpenAmika installed fresh and unmodified by its own
+`scripts\setup_windows.ps1` and `scripts\setup_tts.py`, pointed at the bridge from the Setup page (Detect models, Use
+this model), and talked with by voice, with her avatar and the camera on. Every role completed through the bridge:
+the surface and deep replies (first words in about 0.3 s), the memory writer and the reflection.
 
 ### GB10: DGX Spark and other machines on DGX OS (Ubuntu 24.04, aarch64)
 
