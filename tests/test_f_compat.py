@@ -285,7 +285,8 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(reported_charge({"cost": 2}), 2.0)
         self.assertEqual(reported_charge({"cost_in_usd_ticks": 37756000, "cost": 9.9}), 0.0037756)    # ticks first
         for usage in (None, {}, {"cost": -1}, {"cost": True}, {"cost": "0.1"}, {"cost": float("nan")},
-                      {"cost_in_usd_ticks": -5}, {"cost_in_usd_ticks": 1.5}, {"cost_in_usd_ticks": True}):
+                      {"cost_in_usd_ticks": -5}, {"cost_in_usd_ticks": 1.5}, {"cost_in_usd_ticks": True},
+                      {"cost_in_usd_ticks": 10 ** 400}, {"cost": 10 ** 400}):
             self.assertIsNone(reported_charge(usage), usage)
 
     def test_a_redirect_is_an_error(self):
