@@ -502,9 +502,8 @@ def install_roles(g, root, memory, meter, scope, local, pricing):
         # Model Studio reports no cost: its receipt carries the price-table amount. An OpenAI-compatible server's
         # charge goes to the meter only when the server reported one. Ollama costs nothing.
         reported = (receipt.get("usage") or {}).get("cost_source") == "provider"
-        extra = ({"reported_cost_usd": receipt.get("cost_usd")} if transport == ALIBABA
-                 else {"reported_cost_usd": receipt.get("cost_usd")} if transport == COMPAT and reported
-                 else {"reported_cost_usd": 0.0} if transport in (OLLAMA, COMPAT) else {})
+        extra = ({"reported_cost_usd": receipt.get("cost_usd")} if transport == ALIBABA or (transport == COMPAT and reported)
+                 else {"reported_cost_usd": 0.0} if transport == OLLAMA else {})
         meter.finish(handle, usage=receipt["raw_usage"] or None, status=receipt["status"],
                      actual_model=receipt.get("actual_model"), actual_provider=receipt.get("actual_provider"),
                      provider_request_id=receipt.get("request_id"), error=receipt.get("error_type"), **extra)

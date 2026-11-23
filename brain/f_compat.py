@@ -213,6 +213,8 @@ def _error_detail(response, key=""):
     detail = ""
     try:
         payload = response.json()
+        if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+            payload = payload[0]                 # Google's OpenAI-compatible endpoint wraps its error in a list
         error = payload.get("error") if isinstance(payload, dict) else None
         if isinstance(error, dict):
             error = error.get("message")

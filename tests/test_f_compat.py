@@ -202,6 +202,13 @@ class ClientTests(unittest.TestCase):
         self.client.complete(cfg, [{"role": "user", "content": "u"}])
         self.assertEqual(len(self.http.calls), 3)            # no second refusal: the server's rule was remembered
 
+    def test_an_error_wrapped_in_a_list_still_explains_itself(self):
+        cfg = compat_role_config(SERVER, "local-model", "surface")
+        self.http.responses = [Response(status=404, data=[{"error": {"code": 404, "message": "This model is gone"}}])]
+        with self.assertRaises(Exception) as caught:
+            list(self.client.stream(cfg, [{"role": "user", "content": "u"}]))
+        self.assertIn("HTTP 404: This model is gone", str(caught.exception))
+
     def test_other_errors_explain_themselves(self):
         cfg = compat_role_config(SERVER, "local-model", "surface")
         self.http.responses = [Response(status=400, data={"error": {"message": "context too long"}})]
@@ -657,9 +664,14 @@ class TwoServersEndToEnd(unittest.TestCase):
             self.turn("deep", "big-off")
         receipt = json.loads(next((self.root / "memory_f/compat_receipts").glob("*.json")).read_text(encoding="utf-8"))
         self.assertEqual((receipt["status"], receipt["cost_usd"], receipt["usage"]["cost_source"]), ("complete", 0.00025, "provider"))
+        with patch.object(f_compat, "is_local", lambda base_url: False):
+            self.turn("surface", "fast")                                    # a hosted server that reports no charge
+        self.turn("surface", "fast")                                        # a local one
         with self.meter._connect() as conn:
-            rows = conn.execute("SELECT status, cost_usd FROM requests").fetchall()
-        self.assertEqual([(row["status"], row["cost_usd"]) for row in rows], [("complete", 0.00025)])
+            rows = conn.execute("SELECT status, cost_usd, cost_source FROM requests ORDER BY rowid").fetchall()
+        self.assertEqual([(row["status"], row["cost_usd"], row["cost_source"]) for row in rows],
+                         [("complete", 0.00025, "provider_reported"), ("complete", 0.0, "snapshot_rates"),
+                          ("complete", 0.0, "snapshot_rates")])
         self.assertEqual(self.meter.summary()["active_requests"], 0)
 
     def test_a_server_that_is_down_fails_only_its_own_role(self):
