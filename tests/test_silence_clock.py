@@ -263,6 +263,23 @@ class SilenceSettingRouteTests(unittest.TestCase):
         self.assertEqual(self.route()[1], 403)
         self.assertEqual(self.g["SILENCE_REMARKS"], "normal")
 
+    def test_voice_timeouts_default_change_and_keep_the_rest(self):
+        result = self.call()
+        self.assertEqual((result["tts_first_audio_timeout_ms"], result["tts_sentence_timeout_ms"]), (2000, 10000))
+        result = self.call("POST", {"tts_sentence_timeout_ms": 15000})
+        self.assertEqual((result["tts_first_audio_timeout_ms"], result["tts_sentence_timeout_ms"]), (2000, 15000))
+        stored = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual(stored["tts_sentence_timeout_ms"], 15000)
+        self.assertEqual(stored["test_budget_usd"], 20)                # the rest of build_f.json is kept
+        self.assertEqual(self.g["SILENCE_REMARKS"], "normal")           # silence remarks untouched
+
+    def test_bad_voice_timeouts_are_refused(self):
+        for value in ({"tts_first_audio_timeout_ms": 100}, {"tts_sentence_timeout_ms": 90000},
+                      {"tts_sentence_timeout_ms": "5000"}, {"tts_sentence_timeout_ms": True},
+                      {"tts_first_audio_timeout_ms": 2500.5}):
+            self.assertEqual(self.call("POST", value)[1], 400, value)
+        self.assertEqual(self.call()["tts_first_audio_timeout_ms"], 2000)
+
     def test_the_brain_reads_it_at_start(self):
         config = json.loads(self.config.read_text(encoding="utf-8"))
         config["silence_remarks"] = "off"

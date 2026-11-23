@@ -214,6 +214,15 @@
         </select></div>
       <span class="card-hint" id="pSilenceNote" style="flex:2">Counted from the moment her voice stops.</span>
     </div>
+    <div class="form-row" style="margin-bottom:12px;">
+      <div class="field" style="flex:1"><label>Her first words may take (ms)</label>
+        <input type="number" id="pVoiceFirst" min="500" max="60000" step="100"></div>
+      <div class="field" style="flex:1"><label>Any one sentence may take (ms)</label>
+        <input type="number" id="pVoiceSentence" min="500" max="60000" step="100"></div>
+      <span class="card-hint" id="pVoiceNote" style="flex:2">How long her voice may take. Past the first, the reply
+        counts as started and her first words still play when they come; past the second, that sentence is
+        skipped. Raise them if her voice shares a busy GPU.</span>
+    </div>
     <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
       <button class="btn primary" id="pIdentitySave">Save</button>
       <span class="card-hint mono" id="pClock"></span>

@@ -799,7 +799,7 @@ async def build_f_conversation_get():
                 payload = await response.json()
         if not isinstance(payload, dict) or payload.get("ok") is not True:
             raise ValueError("Unexpected conversation settings")
-        return {key: payload.get(key) for key in ("ok", "silence_remarks", "choices", "interval_s")}
+        return {key: payload.get(key) for key in ("ok", "silence_remarks", "choices", "interval_s", "tts_first_audio_timeout_ms", "tts_sentence_timeout_ms")}
     except HTTPException:
         raise
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
@@ -810,7 +810,7 @@ async def build_f_conversation_get():
 async def build_f_conversation_set(request: Request):
     """A settings change only (no turn, no memory): allowed while she talks."""
     return await _build_f_control(request, "/api/build_f/conversation", "conversation",
-                                  ("ok", "silence_remarks", "choices", "interval_s"), check_busy=False)
+                                  ("ok", "silence_remarks", "choices", "interval_s", "tts_first_audio_timeout_ms", "tts_sentence_timeout_ms"), check_busy=False)
 
 
 async def _build_f_control(request, route, action, allowed_fields, max_body=8192, check_busy=True, base=None,

@@ -747,6 +747,8 @@
   // her silence remarks ("you're quiet"): off / rare / normal, counted from the moment her voice stops
   function showSilence(r) {
     $("pSilence").value = r.silence_remarks || "normal";
+    if (r.tts_first_audio_timeout_ms) $("pVoiceFirst").value = r.tts_first_audio_timeout_ms;
+    if (r.tts_sentence_timeout_ms) $("pVoiceSentence").value = r.tts_sentence_timeout_ms;
     $("pSilenceNote").textContent = r.interval_s ? "After about " + r.interval_s + " s of quiet, counted from the moment her voice stops."
       : "She does not remark on silences.";
   }
@@ -757,6 +759,16 @@
       toast("Saved — applies at once.");
     } catch (error) { toast(String(error.message || error), true); }
   });
+  // her voice's two timeouts: saved on change, read by her voice on its next sentence
+  for (const [id, key] of [["pVoiceFirst", "tts_first_audio_timeout_ms"], ["pVoiceSentence", "tts_sentence_timeout_ms"]]) {
+    $(id).addEventListener("change", async () => {
+      const ms = Math.round(Number($(id).value));
+      try {
+        showSilence(await postAction("/api/build_f/conversation", "conversation", { [key]: ms }));
+        toast("Saved — applies from her next sentence.");
+      } catch (error) { toast(String(error.message || error), true); }
+    });
+  }
 
   $("pSave").addEventListener("click", async () => {
     const target = $("pTarget").value;
