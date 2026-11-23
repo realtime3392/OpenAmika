@@ -107,8 +107,9 @@
         <b>The model's size matters as much as on Ollama:</b> below 27B parameters she loses her character and breaks her
         reply format. Load it with a context of at least 16k tokens: her prompts are about 8k, and many servers default
         to less and cut them silently. A model that thinks at length can use up its whole answer and say nothing, so
-        prefer one with thinking turned off for her surface and deep roles. <b>Her cost tile shows these models at
-        zero</b>: a server of your own charges nothing, and a hosted API bills you on its own account.
+        prefer one with thinking turned off for her surface and deep roles. <b>Her cost tile shows a server of your own at
+        zero</b>. A hosted API is counted only when it reports its charge with each answer (xAI does); otherwise it shows
+        zero too, and bills you on its own account.
       </p>
     </div>
     <div data-pro>

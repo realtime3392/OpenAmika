@@ -341,7 +341,8 @@ GPU memory). Attach it when you ask on [Discord](https://discord.gg/mekahime) or
   the way to models Ollama does not load, such as NVIDIA's NVFP4 builds on vLLM. On the Setup page choose Brain →
   OpenAI-compatible, type its address (and its key, if it asks for one) → Detect models → Use this model. Plain
   `http` is for a server on your PC or your own network; anything else must be `https`. The same size advice
-  applies, and her cost tile does not count a hosted API's charges.
+  applies. Her cost tile counts a hosted API's charge only when the API reports it with each answer (xAI does);
+  any other hosted API's calls show as zero there, and its bill is on its own account.
 - **Her helpers**: Hermes Agent or nanoMuse run errands for her, and her desk view shows what they do
   ([below](#her-helpers-hermes-and-nanomuse)). Any other MCP server works too, on the Tools page
   ([docs/TOOLS.md](docs/TOOLS.md)).
