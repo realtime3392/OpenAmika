@@ -4035,11 +4035,11 @@ class DialogSession:
             f"[dlg {self._peer}] tts first-audio timeout ({self.TTS_FIRST_AUDIO_TIMEOUT_MS}ms), "
             f"turn={turn_id_at_request} — treat as arrived"
         )
-        # 标记 + 清掉 inflight 和队列：TTS 看起来丢了，后面的句子也别指望
+        # Mark the first audio as arrived so the turn is protected, but keep the
+        # sentence in flight and the queue: a slow first sentence (the voice shares
+        # the GPU with the deep pass) still plays in its place when it arrives. A
+        # sentence that never comes back is skipped by _tts_inflight_watchdog.
         self._tts_first_audio_sent = True
-        self._tl_hook("note_tts_failed", turn_id_at_request, inflight.get("idx"))
-        self._tts_inflight = None
-        self._tts_sentence_queue.clear()
         # 直接 protect（delay=0）：已经等过 1s 了，不再叠加
         asyncio.create_task(
             self._protect_after_first_audio(turn_id_at_request, delay=0.0)
