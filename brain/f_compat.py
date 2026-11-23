@@ -270,14 +270,18 @@ def reported_charge(usage):
     """The charge, in USD, that a hosted server put in a call's usage object, or None when it reported none.
 
     Two forms are known: xAI's ``cost_in_usd_ticks`` (an integer, 10**10 ticks to the dollar) and a plain ``cost``
-    in dollars (OpenRouter's form). Anything else, a negative amount or a boolean is no report at all."""
+    in dollars (OpenRouter's form). Anything else, a negative amount, a boolean or a number too large to be an
+    amount is no report at all."""
     usage = usage if isinstance(usage, dict) else {}
-    ticks = usage.get("cost_in_usd_ticks")
-    if isinstance(ticks, int) and not isinstance(ticks, bool) and ticks >= 0:
-        return ticks / USD_TICKS
-    cost = usage.get("cost")
-    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and math.isfinite(cost) and cost >= 0:
-        return float(cost)
+    try:
+        ticks = usage.get("cost_in_usd_ticks")
+        if isinstance(ticks, int) and not isinstance(ticks, bool) and ticks >= 0:
+            return ticks / USD_TICKS
+        cost = usage.get("cost")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool) and math.isfinite(cost) and cost >= 0:
+            return float(cost)
+    except OverflowError:       # an integer beyond a float's range, from a server nobody reviewed
+        pass
     return None
 
 
