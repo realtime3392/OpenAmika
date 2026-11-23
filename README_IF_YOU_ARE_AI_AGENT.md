@@ -608,9 +608,11 @@ prompt: unlike Ollama, this transport cannot set the context window, so the serv
   `[compat] … used its whole answer budget thinking` and she says nothing, so prefer a model with thinking off for
   `surface` and `deep`.
 - These calls are booked at zero cost and with no cache share, as Ollama's are (cost source `local`). A hosted
-  API's price is unknown here: an `https` server's calls are booked at zero too, marked `unreported`, and its bill
-  is on its own account. Tokens are zero when the server reports no usage. Receipts go to
-  `memory_f/compat_receipts/`.
+  API that puts its charge in the usage object is booked at that charge (cost source `provider`): xAI's
+  `cost_in_usd_ticks` (10¹⁰ ticks to the dollar), or a `cost` in dollars as OpenRouter gives it. Any other `https`
+  server's calls are booked at zero, marked `unreported`, and its bill is on its own account. Either way the budget
+  cannot stop a call to it beforehand: no price is known here before the call. Tokens are zero when the server
+  reports no usage. Receipts go to `memory_f/compat_receipts/`.
 - The first-run wizard on the Use page offers OpenRouter and Ollama only; this one is set on the Setup page (the
   wizard's brain step can be skipped).
 

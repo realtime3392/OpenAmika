@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 from _llm_stub import LlmStub, unused_url                           # noqa: E402
 import f_compat                                                     # noqa: E402
 import f_memory                                                     # noqa: E402
-from f_compat import (COMPAT, KEY_ENV, CompatClient, ThinkFilter, compat_base_url, compat_role_config,   # noqa: E402
+from f_compat import (COMPAT, KEY_ENV, CompatClient, ThinkFilter, compat_base_url, compat_role_config, reported_charge,   # noqa: E402
                       discover, load_compat_config, local_address, save_compat_config, save_key, saved_key,
                       strip_thinking)
 from f_memory import MemoryRuntime                                   # noqa: E402
@@ -257,6 +257,29 @@ class ClientTests(unittest.TestCase):
         self.assertEqual([(r["cost_usd"], r["usage"]["cost_source"]) for _, r in self.receipts],
                          [(0.0, "local"), (0.0, "unreported")])
         self.assertEqual(self.http.calls[1][0], "https://api.example.com/v1/chat/completions")
+
+    def test_a_charge_the_server_reports_is_the_cost(self):
+        cfg = compat_role_config(SERVER, "local-model", "surface")
+        ticks = {"prompt_tokens": 187, "completion_tokens": 2, "cost_in_usd_ticks": 1043500}     # xAI's form
+        dollars = {"prompt_tokens": 9, "completion_tokens": 3, "cost": 0.0021}                   # OpenRouter's form
+        self.http.responses = [Response(lines=sse("status: ok", usage=ticks)), Response(lines=sse("status: ok", usage=dollars)),
+                               Response(lines=sse("status: ok", usage=ticks))]
+        hosted = self.make("https://api.example.com/v1", "sk-secret")
+        list(hosted.stream(cfg, [{"role": "user", "content": "u"}]))
+        list(hosted.stream(cfg, [{"role": "user", "content": "u"}]))
+        list(self.client.stream(cfg, [{"role": "user", "content": "u"}]))                      # a local server
+        self.assertEqual([(r["status"], r["cost_usd"], r["usage"]["cost_source"]) for _, r in self.receipts],
+                         [("complete", 0.00010435, "provider"), ("complete", 0.0021, "provider"), ("complete", 0.0, "local")])
+        self.assertNotIn("reported_charge_exceeds_reservation", self.receipts[0][1]["issues"])
+
+    def test_only_a_well_formed_charge_counts(self):
+        self.assertEqual(reported_charge({"cost_in_usd_ticks": 10 ** 10}), 1.0)
+        self.assertEqual(reported_charge({"cost_in_usd_ticks": 0}), 0.0)
+        self.assertEqual(reported_charge({"cost": 2}), 2.0)
+        self.assertEqual(reported_charge({"cost_in_usd_ticks": 37756000, "cost": 9.9}), 0.0037756)    # ticks first
+        for usage in (None, {}, {"cost": -1}, {"cost": True}, {"cost": "0.1"}, {"cost": float("nan")},
+                      {"cost_in_usd_ticks": -5}, {"cost_in_usd_ticks": 1.5}, {"cost_in_usd_ticks": True}):
+            self.assertIsNone(reported_charge(usage), usage)
 
     def test_a_redirect_is_an_error(self):
         cfg = compat_role_config(SERVER, "local-model", "surface")
@@ -621,6 +644,22 @@ class TwoServersEndToEnd(unittest.TestCase):
         self.turn("surface", "fast")
         receipt = json.loads(next((self.root / "memory_f/compat_receipts").glob("*.json")).read_text(encoding="utf-8"))
         self.assertEqual((receipt["status"], receipt["cost_usd"], receipt["usage"]["cost_source"]), ("complete", 0.0, "local"))
+        self.assertEqual(self.meter.summary()["active_requests"], 0)
+
+    def test_a_reported_charge_reaches_the_usage_meter(self):
+        charged = LlmStub(["paid"], "status: paid", usage={"prompt_tokens": 5, "completion_tokens": 1,
+                                                          "cost_in_usd_ticks": 2500000})
+        self.addCleanup(charged.close)
+        self.config(big_url=charged.url)
+        self.manager.reload_compat()
+        # The stand-in listens on the loopback; it is taken as a hosted server here, as an https one would be.
+        with patch.object(f_compat, "is_local", lambda base_url: False):
+            self.turn("deep", "big-off")
+        receipt = json.loads(next((self.root / "memory_f/compat_receipts").glob("*.json")).read_text(encoding="utf-8"))
+        self.assertEqual((receipt["status"], receipt["cost_usd"], receipt["usage"]["cost_source"]), ("complete", 0.00025, "provider"))
+        with self.meter._connect() as conn:
+            rows = conn.execute("SELECT status, cost_usd FROM requests").fetchall()
+        self.assertEqual([(row["status"], row["cost_usd"]) for row in rows], [("complete", 0.00025)])
         self.assertEqual(self.meter.summary()["active_requests"], 0)
 
     def test_a_server_that_is_down_fails_only_its_own_role(self):

@@ -499,8 +499,11 @@ def install_roles(g, root, memory, meter, scope, local, pricing):
     def after(handle, receipt):
         # Settle billing first. An archive disk error must not erase a paid call.
         transport = receipt.get("transport") or "openrouter"
-        # Model Studio reports no cost: its receipt carries the price-table amount. Ollama costs nothing.
+        # Model Studio reports no cost: its receipt carries the price-table amount. An OpenAI-compatible server's
+        # charge goes to the meter only when the server reported one. Ollama costs nothing.
+        reported = (receipt.get("usage") or {}).get("cost_source") == "provider"
         extra = ({"reported_cost_usd": receipt.get("cost_usd")} if transport == ALIBABA
+                 else {"reported_cost_usd": receipt.get("cost_usd")} if transport == COMPAT and reported
                  else {"reported_cost_usd": 0.0} if transport in (OLLAMA, COMPAT) else {})
         meter.finish(handle, usage=receipt["raw_usage"] or None, status=receipt["status"],
                      actual_model=receipt.get("actual_model"), actual_provider=receipt.get("actual_provider"),

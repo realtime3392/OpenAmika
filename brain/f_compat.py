@@ -20,8 +20,9 @@ What these servers do not have in common, and how each is handled here:
   ThinkFilter removes both inline forms before a word can reach her voice.
 - Model names. llama.cpp answers with a file path, so a differing name is recorded and is not an error.
 - Usage. Some servers report none: the call still counts as complete, with zero tokens.
-- Cost. A server of your own charges nothing: the ledger books these calls at zero, as it does Ollama's. The price
-  of an https server is unknown here: its calls are booked at zero too, with the cost source "unreported".
+- Cost. A server of your own charges nothing: the ledger books these calls at zero, as it does Ollama's. An https
+  server that reports its charge in the usage object (reported_charge) is booked at it, cost source "provider";
+  any other is booked at zero, "unreported". No price is known before a call, so the reservation is a placeholder.
 - JSON mode. LM Studio refuses ``response_format: json_object``, so none is sent; the writer's prompt asks for JSON.
 - Parameters. A 400 naming ``max_completion_tokens`` or ``stream_options`` adapts the request once and is
   remembered per server. A refused request generated nothing, so this is not a retry of a call that ran.
@@ -30,6 +31,7 @@ import contextlib
 import copy
 import ipaddress
 import json
+import math
 import os
 import re
 import socket
@@ -258,6 +260,25 @@ def discover(http, base_url, key="", *, timeout=(3, 15)):
     return sorted(models, key=lambda m: m["name"])
 
 
+# xAI reports a call's charge in its usage object as an integer number of ticks: $1 is 10**10 ticks.
+USD_TICKS = 10 ** 10
+
+
+def reported_charge(usage):
+    """The charge, in USD, that a hosted server put in a call's usage object, or None when it reported none.
+
+    Two forms are known: xAI's ``cost_in_usd_ticks`` (an integer, 10**10 ticks to the dollar) and a plain ``cost``
+    in dollars (OpenRouter's form). Anything else, a negative amount or a boolean is no report at all."""
+    usage = usage if isinstance(usage, dict) else {}
+    ticks = usage.get("cost_in_usd_ticks")
+    if isinstance(ticks, int) and not isinstance(ticks, bool) and ticks >= 0:
+        return ticks / USD_TICKS
+    cost = usage.get("cost")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and math.isfinite(cost) and cost >= 0:
+        return float(cost)
+    return None
+
+
 def compat_role_config(compat, model_name, role, *, max_tokens=None):
     """Per-role parameters for a listed model (the shape the role manager and the client read)."""
     role = "memory_write" if role == "memory_extraction" else role
@@ -384,15 +405,20 @@ class CompatClient(OpenRouterClient):
         receipt["request_id"] = "compat-" + uuid.uuid4().hex[:12]     # telemetry keys its timings by id
         receipt["actual_provider"] = COMPAT
         receipt["_think"] = ThinkFilter(config["role"])
+        # The reservation is a placeholder, not a bound on the price, so a charge the server reports afterwards is
+        # not "more than was reserved" (f_openrouter's settle step reads this).
+        receipt["reservation_is_placeholder"] = True
         return handle, receipt
 
     def _usage(self, receipt, embedding):
         raw = receipt.get("raw_usage") or {}
         counts = {k: raw[k] if isinstance(raw.get(k), int) and not isinstance(raw.get(k), bool) and raw[k] >= 0 else 0
                   for k in ("prompt_tokens", "completion_tokens")}
-        receipt["raw_usage"] = dict(counts, cost=0.0)
+        local = is_local(self.base_url)
+        charge = None if local else reported_charge(raw)
+        receipt["raw_usage"] = dict(counts, cost=0.0 if charge is None else charge)
         usage = normalize_usage(receipt["raw_usage"], embedding=embedding)
-        usage["cost_source"] = "local" if is_local(self.base_url) else "unreported"
+        usage["cost_source"] = "local" if local else "unreported" if charge is None else "provider"
         return usage
 
     def _settle(self, handle, receipt, started, done, cancelled, error, *, embedding=False, drained=False):
