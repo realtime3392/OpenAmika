@@ -50,6 +50,22 @@ logger = logging.getLogger("yumeha")
 # ----------------------------- word replacer ------------------------------ #
 # Standalone, clone-owned pronunciation and STT correction map.
 _WORDMAP_PATH = str(Path(__file__).resolve().parent.parent / "config" / "word_replace.json")
+_BUILD_F_PATH = Path(__file__).resolve().parent.parent / "config" / "build_f.json"
+
+
+def _voice_timeout_ms(key, default, low=500, high=60000):
+    """A voice timeout from config/build_f.json, read when it is needed so a change applies on the next sentence.
+    "tts_first_audio_timeout_ms": how long the first sentence of a reply may take before the turn is treated as
+    started (the sentence still plays when it arrives). "tts_sentence_timeout_ms": how long any one sentence may take
+    before it is skipped. A missing, unreadable or out-of-range value gives the default."""
+    try:
+        with open(_BUILD_F_PATH, encoding="utf-8") as f:
+            value = (json.load(f) or {}).get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and low <= value <= high:
+            return int(value)
+    except (OSError, ValueError):
+        pass
+    return default
 _wordmap = {"mtime": None, "stt": [], "tts": [], "keep_caps": []}
 
 
@@ -2812,8 +2828,9 @@ class DialogSession:
     OFFLINE_PAUSE_MS = 900  # 离线：Hane/TTS 没连上时退化为纯 STT，900ms 直接 reset（原有行为）
     PRE_SPEECH_PAD_MS = 200 # IDLE 时保留最近 N ms 音频，开口时塞回前面，防止丢字头
     MAX_UTTERANCE_SEC = 30
+    # Defaults; config/build_f.json "tts_first_audio_timeout_ms" and "tts_sentence_timeout_ms" override them.
     TTS_FIRST_AUDIO_TIMEOUT_MS = 2000  # 发出 TTS 请求后 2s 内没首音频 -> 视为已到达，直接 protect
-    TTS_INFLIGHT_TIMEOUT_MS = 5000  # 任一句 TTS 5s 内没回 audio_ready/error -> 跳过排空队列，防卡死
+    TTS_INFLIGHT_TIMEOUT_MS = 10000  # 任一句 TTS 10s 内没回 audio_ready/error -> 跳过排空队列，防卡死
     # 真打断"迟到确认"门控：仅在 AI 实际正在说话（_protected=True 且 TTS 还在活跃）时生效。
     # 从 VAD 首次检测到用户语音起：
     #   0  - INTERRUPT_GATE_LOCK_MS   锁定期，静默吃掉；帧入 probe 缓冲
@@ -4023,7 +4040,8 @@ class DialogSession:
         发出请求后 1s 内没收到任何首段音频 → 视为已到达，立即走 protect 流程，
         避免 TTS 回包丢失/慢时永远卡在 POST_COMMIT，音频不分界。
         """
-        await asyncio.sleep(self.TTS_FIRST_AUDIO_TIMEOUT_MS / 1000)
+        first_audio_ms = _voice_timeout_ms("tts_first_audio_timeout_ms", self.TTS_FIRST_AUDIO_TIMEOUT_MS)
+        await asyncio.sleep(first_audio_ms / 1000)
         # 已经收到首段 / 已经被清空 / 这个 task 不再是 inflight → 不做事
         if self._tts_first_audio_sent:
             return
@@ -4032,7 +4050,7 @@ class DialogSession:
             return
         # turn 已经换了（用户打断 / 延续）—— protect 流程里自会判断并跳过
         logger.warning(
-            f"[dlg {self._peer}] tts first-audio timeout ({self.TTS_FIRST_AUDIO_TIMEOUT_MS}ms), "
+            f"[dlg {self._peer}] tts first-audio timeout ({first_audio_ms}ms), "
             f"turn={turn_id_at_request} — treat as arrived"
         )
         # Mark the first audio as arrived so the turn is protected, but keep the
@@ -4051,12 +4069,13 @@ class DialogSession:
         """每句 TTS 兜底：发出后 TTS_INFLIGHT_TIMEOUT_MS 内既没 audio_ready 也没 error
         回来 → 视为这句丢了，清 inflight 并继续排空队列。否则一句卡死会让 _tts_inflight
         永远非空、"audio busy" 门一直为真，后续 inject（念弹幕 / SC）全被吞。"""
-        await asyncio.sleep(self.TTS_INFLIGHT_TIMEOUT_MS / 1000)
+        sentence_ms = _voice_timeout_ms("tts_sentence_timeout_ms", self.TTS_INFLIGHT_TIMEOUT_MS)
+        await asyncio.sleep(sentence_ms / 1000)
         inflight = self._tts_inflight
         if inflight is None or inflight.get("task_id") != task_id:
             return                       # 已被 audio_ready / error / reset 消耗
         logger.warning(
-            f"[dlg {self._peer}] tts inflight timeout ({self.TTS_INFLIGHT_TIMEOUT_MS}ms) "
+            f"[dlg {self._peer}] tts inflight timeout ({sentence_ms}ms) "
             f"idx={inflight.get('idx')} turn={turn_id_at_request} — skip, drain queue"
         )
         self._tl_hook("note_tts_failed", turn_id_at_request, inflight.get("idx"))
