@@ -268,6 +268,9 @@ def install_controls(g, meter):
                         number = value[key]
                         if not isinstance(number, int) or isinstance(number, bool) or not low <= number <= high:
                             raise ValueError(f'{key} must be a whole number of milliseconds from {low} to {high}.')
+                merged = {**voice_timeouts(), **{k: v for k, v in value.items() if k in VOICE_TIMEOUTS}}
+                if merged['tts_first_audio_timeout_ms'] > merged['tts_sentence_timeout_ms']:
+                    raise ValueError('tts_first_audio_timeout_ms cannot be longer than tts_sentence_timeout_ms.')
                 path = build_f_path()
                 document = json.loads(path.read_text(encoding='utf-8-sig'))
                 document.update(value)

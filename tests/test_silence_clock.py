@@ -280,6 +280,12 @@ class SilenceSettingRouteTests(unittest.TestCase):
             self.assertEqual(self.call("POST", value)[1], 400, value)
         self.assertEqual(self.call()["tts_first_audio_timeout_ms"], 2000)
 
+    def test_first_audio_timeout_is_not_longer_than_the_sentence_timeout(self):
+        self.assertEqual(self.call("POST", {"tts_first_audio_timeout_ms": 12000})[1], 400)
+        self.assertEqual(self.call("POST", {"tts_sentence_timeout_ms": 1500})[1], 400)
+        result = self.call("POST", {"tts_sentence_timeout_ms": 20000})
+        self.assertEqual(self.call("POST", {"tts_first_audio_timeout_ms": 12000})["tts_first_audio_timeout_ms"], 12000)
+
     def test_the_brain_reads_it_at_start(self):
         config = json.loads(self.config.read_text(encoding="utf-8"))
         config["silence_remarks"] = "off"
