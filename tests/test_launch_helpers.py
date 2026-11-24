@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _shipped import shipped_bytes  # noqa: E402  (what ships, not what onboarding wrote: see tests/_shipped.py)
+from _llm_stub import LlmStub, unused_url  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location("openamika_launch", ROOT / "launch.py")
@@ -50,6 +51,51 @@ class LocalRolesTests(unittest.TestCase):
         old = launch.ROOT
         launch.ROOT = Path(tmp.name)
         self.addCleanup(setattr, launch, "ROOT", old)
+
+    def test_compat_checks_look_at_each_server_a_role_uses(self):
+        up = LlmStub(["served-name"])
+        self.addCleanup(up.close)
+        down = unused_url()
+        self._with_roles({"surface": "surface:compat:plain", "deep": "deep:compat:alias",
+                          "reflection": "reflection:compat:other"})
+        (launch.ROOT / "config" / "openai_compat.json").write_text(json.dumps({"base_url": down, "models": [
+            {"name": "plain"}, {"name": "alias", "served_name": "served-name", "base_url": up.host},
+            {"name": "other", "served_name": "missing", "base_url": up.host}]}), "utf-8")
+        got = launch.compat_checks()
+        self.assertIn(("ok", "LLM server", f"answers at {up.url}"), got)
+        self.assertIn(("ok", "LLM model alias", "deep"), got)
+        self.assertIn(("err", "LLM model other", "not listed by the server (reflection need it)"), got)
+        self.assertTrue(any(c[0] == "err" and c[1] == "LLM server" and down in c[2] for c in got))
+
+    def test_compat_checks_for_one_server_and_its_model(self):
+        up = LlmStub(["only"])
+        self.addCleanup(up.close)
+        self._with_roles({"deep": "deep:compat:only"})
+        (launch.ROOT / "config" / "openai_compat.json").write_text(json.dumps({"base_url": up.url, "models": [{"name": "only"}]}), "utf-8")
+        self.assertEqual(launch.compat_checks(), [("ok", "LLM server", f"answers at {up.url}"), ("ok", "LLM model only", "deep")])
+
+    def test_compat_checks_say_why_a_server_will_not_do(self):
+        keyed = LlmStub(["only"], refuse=401)
+        self.addCleanup(keyed.close)
+        self._with_roles({"deep": "deep:compat:keyed", "surface": "surface:compat:far", "reflection": "reflection:compat:tls"})
+        (launch.ROOT / "config" / "openai_compat.json").write_text(json.dumps({"base_url": keyed.url, "models": [
+            {"name": "keyed"}, {"name": "far", "base_url": "http://8.8.8.8:8000/v1"},
+            {"name": "tls", "base_url": "https://127.0.0.1:8000/v1"}]}), "utf-8")
+        got = {detail for level, name, detail in launch.compat_checks() if (level, name) == ("err", "LLM server")}
+        self.assertEqual(len(got), 3, got)
+        self.assertTrue(any("asks for an API key (HTTP 401), and none is ever sent" in d for d in got))
+        self.assertTrue(any("http://8.8.8.8:8000/v1 is a public address (8.8.8.8)" in d for d in got))
+        self.assertTrue(any("https://127.0.0.1:8000/v1 is not a plain http address" in d for d in got))
+        self.assertEqual(keyed.requests[0]["auth"], None)
+
+    def test_a_role_on_a_local_server_needs_no_openrouter_key(self):
+        self._with_roles({r: f"{r}:compat:m" for r in ("deep", "surface", "reflection", "memory_write")})
+        self.assertTrue(launch.roles_all_local())
+        self._with_roles({"deep": "deep:compat:m", "surface": "surface:ollama:qwen3:8b", "reflection": "reflection:ollama:qwen3:8b",
+                          "memory_write": "memory_write:compat:m"})
+        self.assertTrue(launch.roles_all_local())
+        self._with_roles({"deep": "deep:compat:m", "surface": "grok"})
+        self.assertFalse(launch.roles_all_local())
 
     def test_all_ollama(self):
         self._with_roles({r: f"{r}:ollama:qwen3:8b" for r in ("deep", "surface", "reflection", "memory_write")})

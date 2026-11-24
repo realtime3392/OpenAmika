@@ -18,6 +18,7 @@ logs/
 *.sqlite-journal
 config/seed.json
 config/ollama.json
+config/openai_compat.json
 config/voice_map.json
 servers/openamika-iot/devices.json
 servers/openamika-iot/scenes.json

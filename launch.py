@@ -41,6 +41,7 @@ the brain when settings.json has an `embedder` block; the brain reaches it throu
 import argparse
 import errno
 import importlib.util
+import ipaddress
 import json
 import os
 import platform
@@ -471,13 +472,89 @@ def launcher_target(command):
 
 
 def roles_all_local():
-    """True when every LLM role selected in config/llm_roles.json runs on Ollama (no cloud key needed)."""
+    """True when every LLM role selected in config/llm_roles.json runs on Ollama or an OpenAI-compatible server
+    (no OpenRouter key needed)."""
     try:
         doc = json.loads((ROOT / 'config' / 'llm_roles.json').read_text('utf-8-sig'))
         picks = list((doc.get('selections') or {}).values())
     except Exception:
         return False
-    return bool(picks) and all(isinstance(k, str) and ':ollama:' in k for k in picks)
+    return bool(picks) and all(isinstance(k, str) and (':ollama:' in k or ':compat:' in k) for k in picks)
+
+
+def compat_entry_base(url):
+    """config/openai_compat.json's per-entry address as the brain's loader reads it (no path means /v1)."""
+    url = re.sub(r'/(?:chat/completions|models)$', '', str(url or '').strip().rstrip('/'))
+    return url + '/v1' if url and re.fullmatch(r'http://[^/]+', url) else url
+
+
+def compat_not_local(base):
+    """Why the brain will not use this address, or '': it only talks plain http to this PC or a private network
+    (brain/f_compat.py: compat_base_url, local_address)."""
+    try:
+        parts = urlsplit(base)
+        host, port = parts.hostname, parts.port or 80
+    except ValueError:
+        return 'is not an address'
+    if parts.scheme != 'http' or not host:
+        return 'is not a plain http address'
+    try:
+        found = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError:
+        return ''                       # a name that does not resolve is "not answering", said by the caller
+    for info in found:
+        if ipaddress.ip_address(info[4][0].split('%')[0]).is_global:
+            return f'is a public address ({info[4][0]})'
+    return ''
+
+
+def compat_checks():
+    """[(level, name, detail)] when a role runs on a local OpenAI-compatible server: is its address one the brain
+    will use, does it answer, does it list the models the roles need. Nothing when no role uses one."""
+    try:
+        picks = json.loads((ROOT / 'config' / 'llm_roles.json').read_text('utf-8-sig')).get('selections') or {}
+    except Exception:
+        return []
+    models = {}
+    for role, key in picks.items() if isinstance(picks, dict) else ():
+        if isinstance(key, str) and ':compat:' in key:
+            models.setdefault(key.split(':compat:', 1)[1], []).append(str(role))
+    if not models:
+        return []
+    try:
+        doc = json.loads((ROOT / 'config' / 'openai_compat.json').read_text('utf-8-sig'))
+        top = str(doc.get('base_url') or '')
+    except Exception:
+        return [('err', 'LLM server', 'config/openai_compat.json is missing — Setup → Brain → OpenAI-compatible → Detect models')]
+    entries = {str(m.get('name')): m for m in doc.get('models') or [] if isinstance(m, dict)}
+    servers = {}
+    for model, roles in models.items():
+        entry = entries.get(model) or {}
+        servers.setdefault(compat_entry_base(entry.get('base_url')) or top, []).append(
+            (str(entry.get('served_name') or model), model, roles))
+    out = []
+    for base, wanted in servers.items():
+        why = compat_not_local(base)
+        if why:
+            out.append(('err', 'LLM server', f'{base} {why}: she only uses a server on this PC or your own network '
+                                             '(Setup → Brain)'))
+            continue
+        try:
+            with urlopen(base + '/models', timeout=5) as response:
+                listed = {str(m.get('id')) for m in json.loads(response.read()).get('data') or [] if isinstance(m, dict)}
+        except HTTPError as error:
+            out.append(('err', 'LLM server', f'{base} asks for an API key (HTTP {error.code}), and none is ever sent: '
+                                             'start the server without one') if error.code in (401, 403) else
+                       ('warn', 'LLM server', f'answers at {base} (HTTP {error.code}); its models cannot be listed from here'))
+            continue
+        except Exception:
+            out.append(('err', 'LLM server', f'not answering at {base} — start it (or fix its address on Setup → Brain)'))
+            continue
+        out.append(('ok', 'LLM server', f'answers at {base}'))
+        for served, model, roles in wanted:
+            out.append(('ok', f'LLM model {model}', ', '.join(roles)) if served in listed else
+                       ('err', f'LLM model {model}', f'not listed by the server ({", ".join(roles)} need it)'))
+    return out
 
 
 OLLAMA_DEFAULT = 'http://127.0.0.1:11434'
@@ -1368,17 +1445,19 @@ def preflight(cfg, emb, vis, tools, tools_error, services, agents, procs, deep=F
                'all present' if not missing else ', '.join(f'{p} ({hints.get(p, "missing")})' for p in missing))
     env = read_env(ROOT / 'brain' / '.env')
     key = env.get('OPENROUTER_API_KEY', '')
+    compat_rows = compat_checks()
     if key and not key.startswith('sk-or-v1-your'):
         others = [k for k in ('DASHSCOPE_API_KEY', 'GEMINI_API_KEY', 'GROQ_API_KEY', 'CEREBRAS_API_KEY', 'ANTHROPIC_API_KEY') if env.get(k)]
         report.add('ok', 'API keys', f'OpenRouter key set (…{key[-4:]})' + (f'; also {", ".join(others)}' if others else ''))
     elif local_only:
-        report.add('ok', 'API keys', 'no OpenRouter key, none needed: every role runs on Ollama (Setup → Brain)')
+        report.add('ok', 'API keys', 'no OpenRouter key, none needed: every role runs on '
+                                     + ('your own server' if compat_rows else 'Ollama') + ' (Setup → Brain)')
     else:
         report.add('warn', 'API keys', 'no OpenRouter key yet — paste it in the first-run wizard on the Use page (or put '
                                        'it after OPENROUTER_API_KEY= in brain/.env); until then she cannot answer. '
                                        'Fully local needs a model of 27B or more: switch the roles to Ollama on '
                                        'Setup → Brain')
-    for level, name, detail in ollama_checks():
+    for level, name, detail in ollama_checks() + compat_rows:
         report.add(level, name, detail)
     fit_check = model_fit_check(vis is not None)
     if fit_check:
@@ -1748,9 +1827,9 @@ def start_failure(svc, report=None):
 
 
 def brain_caveat(report=None):
-    """What keeps a running brain from answering: no OpenRouter key for a cloud role, Ollama down or a model not
-    pulled, a local model that does not fit ('' when nothing). The key is read again each time (the wizard saves it
-    while the launcher runs)."""
+    """What keeps a running brain from answering: no OpenRouter key for a cloud role, Ollama or a local model
+    server down or without a model the roles need, a local model that does not fit ('' when nothing). The key is
+    read again each time (the wizard saves it while the launcher runs)."""
     if not roles_all_local():
         key = read_env(ROOT / 'brain' / '.env').get('OPENROUTER_API_KEY', '')
         if not key or key.startswith('sk-or-v1-your'):
@@ -1758,6 +1837,8 @@ def brain_caveat(report=None):
     for check in (report.checks if report is not None else []):
         if (check['name'] == 'Ollama' or check['name'].startswith('Ollama model')) and check['level'] == 'err':
             return check['detail']
+        if (check['name'] == 'LLM server' or check['name'].startswith('LLM model')) and check['level'] == 'err':
+            return ('the model server: ' if check['name'] == 'LLM server' else check['name'] + ': ') + check['detail']
         if check['name'] == 'local model fit' and check['level'] != 'ok':
             return 'the model does not fit: ' + check['detail']
     return ''

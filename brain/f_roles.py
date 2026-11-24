@@ -34,6 +34,7 @@ from f_memory import _write
 from f_openrouter import (ALIBABA, AlibabaClient, OpenRouterClient, alibaba_base_url, alibaba_role_config,
                           embedding_config, load_alibaba_catalog, load_catalog, role_config)
 from f_ollama import OLLAMA, THINKING_ROLES, OllamaClient, load_ollama_config, ollama_role_config
+from f_compat import COMPAT, CompatClient, compat_role_config, load_compat_config
 
 ROLES = ("surface", "deep", "reflection", "memory_write")
 NATIVE_KEYS = {"surface": "grok-4.3-fast", "deep": "claude-5-sonnet",
@@ -41,9 +42,9 @@ NATIVE_KEYS = {"surface": "grok-4.3-fast", "deep": "claude-5-sonnet",
 DEFAULT_NAMES = {"surface": "DEFAULT_SURFACE_MODEL", "deep": "DEFAULT_DEEP_MODEL",
                  "reflection": "DEFAULT_THINKING_MODEL"}
 LIST_NAMES = {"surface": "SURFACE_MODEL_KEYS", "deep": "DEEP_MODEL_KEYS", "reflection": "THINKING_MODEL_KEYS"}
-# Role transports (option "provider"); a row without one is OpenRouter. Ollama options are not rows of
-# llm_roles.json: they are generated from config/ollama.json (whatever the local server has pulled).
-PROVIDERS = ("openrouter", ALIBABA, OLLAMA)
+# Role transports (option "provider"); a row without one is OpenRouter. Ollama and OpenAI-compatible options are not
+# rows of llm_roles.json: they are generated from config/ollama.json and config/openai_compat.json.
+PROVIDERS = ("openrouter", ALIBABA, OLLAMA, COMPAT)
 # The native memory writer is not an AVAILABLE_MODELS entry; its provider is fixed.
 NATIVE_PROVIDERS = {"claude-sonnet-5": "anthropic"}
 # webui's legacy per-layer model routes (Flask endpoint names) and its model list.
@@ -73,6 +74,7 @@ class RoleManager:
         self.alibaba = None
         # The local server's detected models (config/ollama.json; empty until the Setup page detects them).
         self.ollama = load_ollama_config(self.root)
+        self.compat = load_compat_config(self.root)
         self.lock = threading.RLock()
         self.options = {}
         self.native_extract = memory.extract_fn
@@ -101,6 +103,7 @@ class RoleManager:
                 raise ValueError("Each role requires at least one enabled option")
             self.options[role] = choices
         self._ollama_options()
+        self._compat_options()
         self.selection_fallback = {}
         self.selections = self._initial(self.document.get("selections"))
         self.embedding = None
@@ -184,17 +187,43 @@ class RoleManager:
                 except ValueError:
                     continue        # a model that cannot serve this role is simply not offered
 
+    def _compat_options(self):
+        """One option per model the OpenAI-compatible server lists ("<role>:compat:<model>")."""
+        for role in ROLES:
+            for model in self.compat.get("models") or []:
+                key = f"{role}:compat:{model['name']}"
+                if key in self.options[role]:
+                    continue
+                row = {"key": key, "name": f"{model['name']} (OpenAI-compatible server)", "provider": COMPAT,
+                       "model_id": model["name"],
+                       "description": f"Runs on {model.get('base_url') or 'your own server (Setup → Brain)'}. Local: nothing is charged."}
+                try:
+                    self.options[role][key] = self._option(role, key, row)
+                except ValueError:
+                    continue        # a model that cannot serve this role is simply not offered
+
     def reload_ollama(self):
         """Re-read config/ollama.json (after a detect) and swap the Ollama options; a selected model that
         vanished falls back to the fallback preset's choice for that role."""
-        with self.lock:
+        def load():
             self.ollama = load_ollama_config(self.root)
+        return self._reload_generated(OLLAMA, load, self._ollama_options)
+
+    def reload_compat(self):
+        """The same for config/openai_compat.json."""
+        def load():
+            self.compat = load_compat_config(self.root)
+        return self._reload_generated(COMPAT, load, self._compat_options)
+
+    def _reload_generated(self, transport, load, generate):
+        with self.lock:
+            load()
             for role in ROLES:
-                for key in [k for k, v in self.options[role].items() if v.get("transport") == OLLAMA]:
+                for key in [k for k, v in self.options[role].items() if v.get("transport") == transport]:
                     del self.options[role][key]
                     self._registrations.pop(key, None)
                     self.g["AVAILABLE_MODELS"].pop(key, None)
-            self._ollama_options()
+            generate()
             self.g["AVAILABLE_MODELS"].update(self._registrations)
             selections = copy.deepcopy(self.selections)
             moved = False
@@ -214,6 +243,8 @@ class RoleManager:
             return self.get()
 
     def _config(self, role, transport, row):
+        if transport == COMPAT:
+            return compat_role_config(self.compat, row.get("model_id"), role, max_tokens=row.get("max_tokens"))
         if transport == OLLAMA:
             return ollama_role_config(self.ollama, row.get("model_id"), role,
                                       reasoning_enabled=row.get("reasoning_enabled"), max_tokens=row.get("max_tokens"))
@@ -233,9 +264,10 @@ class RoleManager:
                            max_tokens=row.get("max_tokens"), reasoning_enabled=row.get("reasoning_enabled"))
 
     def _add_price(self, config):
-        if config.get("transport") == OLLAMA:
+        if config.get("transport") in (OLLAMA, COMPAT):
             # Local: nothing is charged. A priced (zero) entry keeps the meter's budget gate satisfied.
-            self.meter.pricing["models"]["ollama:" + config["model_id"]] = {"input": 0.0, "output": 0.0, "cache_read": 0.0}
+            self.meter.pricing["models"][config["transport"] + ":" + config["model_id"]] = {
+                "input": 0.0, "output": 0.0, "cache_read": 0.0}
             return
         if config.get("transport") == ALIBABA:
             # Model Studio calls are priced by the transport from the reviewed list price and
@@ -449,7 +481,8 @@ def install_roles(g, root, memory, meter, scope, local, pricing):
     g["F_DISABLED_PROVIDERS"] = dict(manager.disabled_providers)
     receipts_dirs = {"openrouter": Path(root) / "memory_f" / "openrouter_receipts",
                      ALIBABA: Path(root) / "memory_f" / "alibaba_receipts",
-                     OLLAMA: Path(root) / "memory_f" / "ollama_receipts"}
+                     OLLAMA: Path(root) / "memory_f" / "ollama_receipts",
+                     COMPAT: Path(root) / "memory_f" / "compat_receipts"}
 
     def before(request):
         metadata = request["metadata"]
@@ -466,7 +499,7 @@ def install_roles(g, root, memory, meter, scope, local, pricing):
         transport = receipt.get("transport") or "openrouter"
         # Model Studio reports no cost: its receipt carries the price-table amount. Ollama costs nothing.
         extra = ({"reported_cost_usd": receipt.get("cost_usd")} if transport == ALIBABA
-                 else {"reported_cost_usd": 0.0} if transport == OLLAMA else {})
+                 else {"reported_cost_usd": 0.0} if transport in (OLLAMA, COMPAT) else {})
         meter.finish(handle, usage=receipt["raw_usage"] or None, status=receipt["status"],
                      actual_model=receipt.get("actual_model"), actual_provider=receipt.get("actual_provider"),
                      provider_request_id=receipt.get("request_id"), error=receipt.get("error_type"), **extra)
@@ -481,6 +514,8 @@ def install_roles(g, root, memory, meter, scope, local, pricing):
             observer(event)
 
     def client(config=None):
+        if config is not None and config.get("transport") == COMPAT:
+            return CompatClient(g["http_requests"], before, after, base_url=config["base_url"], event_sink=event_sink)
         if config is not None and config.get("transport") == OLLAMA:
             return OllamaClient(g["http_requests"], before, after, base_url=config["base_url"], event_sink=event_sink)
         if config is not None and config.get("transport") == ALIBABA:

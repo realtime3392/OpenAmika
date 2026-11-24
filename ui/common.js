@@ -217,13 +217,14 @@
       else add("ok", "Memory", (memory.events != null ? memory.events + " conversations" : "ready"));
     } catch (error) { add("err", "Brain", "not answering — is the brain running? (launch.py)"); }
     // her brain's provider per role: a cloud role needs the OpenRouter key; a local role needs Ollama up
-    let usesCloud = true, usesOllama = false, localModels = [];
+    let usesCloud = true, usesOllama = false, usesCompat = false, localModels = [];
     try {
       const m = await getJSON("/api/build_f/models");
       const roles = ["surface", "deep", "reflection", "memory_write"];
       const kinds = roles.map((role) => { const item = ((m.options || {})[role] || []).find((o) => o.key === (m.selections || {})[role]); return item ? item.transport : "openrouter"; });
       usesCloud = kinds.includes("openrouter");
       usesOllama = kinds.includes("ollama");
+      usesCompat = kinds.includes("openai_compat");
       localModels = roles.filter((_, i) => kinds[i] === "ollama").map((role) => { const item = (m.options[role] || []).find((o) => o.key === m.selections[role]); return item ? item.model : ""; });
     } catch (_) {}
     if (usesCloud) {
@@ -251,6 +252,15 @@
         else if (missing.length) add("warn", "Ollama (local brain)", "model(s) no longer detected: " + missing.join(", ") + " — Setup → Brain → Detect");
         else add("ok", "Ollama (local brain)", (o.live_version ? "v" + o.live_version + " · " : "") + Array.from(new Set(localModels)).join(", "));
       } catch (_) { add("err", "Ollama (local brain)", "status unavailable"); }
+    }
+    if (usesCompat) {
+      try {
+        const c = await getJSON("/api/build_f/compat");
+        for (const s of (c.servers && c.servers.length ? c.servers : [c])) {
+          if (s.reachable) add("ok", "LLM server", s.base_url);
+          else add("err", "LLM server", (s.error ? s.base_url + " cannot be used: " + s.error : "not answering at " + s.base_url) + " — Setup → Brain");
+        }
+      } catch (_) { add("err", "LLM server", "status unavailable"); }
     }
     // speech / STT
     try {

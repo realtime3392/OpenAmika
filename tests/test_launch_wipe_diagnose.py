@@ -224,6 +224,19 @@ def test_an_up_brain_that_cannot_answer_says_so(checkout):
     assert launch.brain_caveat(launch.Report()) == ''
 
 
+def test_an_up_brain_on_a_local_server_that_is_down_says_which(checkout):
+    picks = {role: f'{role}:compat:local-model' for role in ('surface', 'deep', 'reflection', 'memory_write')}
+    (checkout / 'config' / 'llm_roles.json').write_text(json.dumps({'selections': picks}), 'utf-8')
+    assert launch.brain_caveat(launch.Report()) == ''           # all four roles are local: no key is missing
+    report = launch.Report()
+    report.add('err', 'LLM server', 'not answering at http://127.0.0.1:8000/v1 — start it (or fix its address on Setup → Brain)')
+    assert launch.brain_caveat(report).startswith('the model server: not answering at http://127.0.0.1:8000/v1')
+    report = launch.Report()
+    report.add('ok', 'LLM server', 'answers at http://127.0.0.1:8000/v1')
+    report.add('err', 'LLM model local-model', 'not listed by the server (deep need it)')
+    assert launch.brain_caveat(report) == 'LLM model local-model: not listed by the server (deep need it)'
+
+
 def ollama_roles(checkout, size_gb, base='http://127.0.0.1:11434'):
     picks = {role: f'{role}:ollama:gemma3:27b' for role in ('surface', 'deep', 'reflection', 'memory_write')}
     (checkout / 'config' / 'llm_roles.json').write_text(json.dumps({'selections': picks}), 'utf-8')
