@@ -525,6 +525,8 @@ class CompatClient(OpenRouterClient):
         if data.get("error"):
             error = data["error"]
             message = error.get("message") if isinstance(error, dict) else error
+            if self.api_key and message is not None:
+                message = str(message).replace(self.api_key, "…")    # a server that echoes the key, as in _error_detail
             raise self._told(OpenRouterError("The server reported an error: " + str(message)[:200]),
                              first_line(message) or "an error with no reason given")
         if data.get("model"):

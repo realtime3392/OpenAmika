@@ -232,6 +232,19 @@ class ClientTests(unittest.TestCase):
                          "Your model server: HTTP 401: it refused the API key: enter a new one on Setup → Brain")
         self.assertNotIn("sk-secret", str(caught.exception))     # a server that echoes the key does not get it logged
 
+    def test_a_key_echoed_in_an_error_inside_an_answer_is_cut_out_too(self):
+        cfg = compat_role_config(SERVER, "local-model", "surface")
+        keyed = self.make("https://api.example.com/v1", api_key="sk-secret")
+        echo = {"error": {"message": "upstream rejected key sk-secret"}}
+        for response, call in ((Response(lines=["data: " + json.dumps(echo)]), lambda: list(keyed.stream(cfg, [{"role": "user", "content": "u"}]))),
+                               (Response(data=echo), lambda: keyed.complete(cfg, [{"role": "user", "content": "u"}]))):
+            self.http.responses = [response]                     # HTTP 200 both times: the error is in the body
+            with self.assertRaises(Exception) as caught:
+                call()
+            self.assertEqual(describe_error(caught.exception), "Your model server: upstream rejected key …")
+            self.assertNotIn("sk-secret", str(caught.exception))
+        self.assertNotIn("sk-secret", json.dumps([receipt for _, receipt in self.receipts]))
+
     def test_a_key_is_sent_only_by_a_client_that_was_given_one(self):
         cfg = compat_role_config(SERVER, "local-model", "surface")
         self.http.responses = [Response(lines=sse("status: ok")), Response(data={"data": [{"id": "m"}]}),
