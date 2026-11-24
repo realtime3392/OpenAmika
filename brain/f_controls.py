@@ -222,25 +222,61 @@ def install_controls(g, meter):
         return g['jsonify']({'ok': True, 'retired_requests': retired, 'recovered_jobs': recovered,
                              'stopped': stopped, 'still_running': still})
 
+    # Her voice's two timeouts (build_f.json; the speech service reads them on each sentence): how long her first
+    # sentence may take before the turn counts as started (it still plays when it comes), and how long any one
+    # sentence may take before it is skipped.
+    VOICE_TIMEOUTS = {'tts_first_audio_timeout_ms': 2000, 'tts_sentence_timeout_ms': 10000}
+    VOICE_TIMEOUT_RANGE = (500, 60000)
+
+    def build_f_path():
+        return Path(g['__file__']).resolve().parents[1] / 'config' / 'build_f.json'
+
+    def voice_timeouts():
+        try:
+            document = json.loads(build_f_path().read_text(encoding='utf-8-sig'))
+        except (OSError, ValueError):
+            document = {}
+        low, high = VOICE_TIMEOUT_RANGE
+        out = {}
+        for key, default in VOICE_TIMEOUTS.items():
+            value = document.get(key)
+            ok = isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+            out[key] = value if ok else default
+        return out
+
     def conversation_settings():
         choice = silence_remarks_value(g.get('SILENCE_REMARKS'))
         base = g.get('IDLE_TRIGGER_SECONDS', 30)
         factor = SILENCE_FACTORS.get(choice)
         return {'ok': True, 'silence_remarks': choice, 'choices': list(SILENCE_REMARKS),
-                'interval_s': None if factor is None else int(base * factor)}
+                'interval_s': None if factor is None else int(base * factor), **voice_timeouts()}
 
     @g['app'].route('/api/build_f/conversation', methods=['GET', 'POST'])
     def conversation():
         try:
             if g['request'].method == 'POST':
                 value = action_request('conversation')
-                if set(value) != {'silence_remarks'} or value['silence_remarks'] not in SILENCE_REMARKS:
+                allowed = {'silence_remarks', *VOICE_TIMEOUTS}
+                if not value or not set(value) <= allowed:
+                    raise ValueError('Only silence_remarks, tts_first_audio_timeout_ms and tts_sentence_timeout_ms '
+                                     'can be set here.')
+                if 'silence_remarks' in value and value['silence_remarks'] not in SILENCE_REMARKS:
                     raise ValueError('silence_remarks must be off, rare or normal.')
-                path = Path(g['__file__']).resolve().parents[1] / 'config' / 'build_f.json'
+                low, high = VOICE_TIMEOUT_RANGE
+                for key in VOICE_TIMEOUTS:
+                    if key in value:
+                        number = value[key]
+                        if not isinstance(number, int) or isinstance(number, bool) or not low <= number <= high:
+                            raise ValueError(f'{key} must be a whole number of milliseconds from {low} to {high}.')
+                merged = {**voice_timeouts(), **{k: v for k, v in value.items() if k in VOICE_TIMEOUTS}}
+                if merged['tts_first_audio_timeout_ms'] > merged['tts_sentence_timeout_ms']:
+                    raise ValueError('tts_first_audio_timeout_ms cannot be longer than tts_sentence_timeout_ms.')
+                path = build_f_path()
                 document = json.loads(path.read_text(encoding='utf-8-sig'))
-                document['silence_remarks'] = value['silence_remarks']
+                document.update(value)
                 _write_json(path, document)
-                g['SILENCE_REMARKS'] = value['silence_remarks']
+                if 'silence_remarks' in value:
+                    g['SILENCE_REMARKS'] = value['silence_remarks']
             return g['jsonify'](conversation_settings())
         except PermissionError as error:
             return g['jsonify']({'ok': False, 'error': str(error)}), 403
