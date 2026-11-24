@@ -809,10 +809,6 @@ async def build_f_unlock(request: Request):
     return result
 
 
-_CONVERSATION_KEYS = ("ok", "silence_remarks", "choices", "interval_s",
-                      "tts_first_audio_timeout_ms", "tts_sentence_timeout_ms")
-
-
 @app.get("/api/build_f/conversation")
 async def build_f_conversation_get():
     """How often she remarks on a silence (silence_remarks: off | rare | normal; config/build_f.json)."""
@@ -824,7 +820,9 @@ async def build_f_conversation_get():
                 payload = await response.json()
         if not isinstance(payload, dict) or payload.get("ok") is not True:
             raise ValueError("Unexpected conversation settings")
-        return {key: payload.get(key) for key in _CONVERSATION_KEYS}
+        # (the field list is spelled out here: tests load this function on its own, without module constants)
+        return {key: payload.get(key) for key in ("ok", "silence_remarks", "choices", "interval_s",
+                                                  "tts_first_audio_timeout_ms", "tts_sentence_timeout_ms")}
     except HTTPException:
         raise
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
@@ -835,7 +833,8 @@ async def build_f_conversation_get():
 async def build_f_conversation_set(request: Request):
     """A settings change only (no turn, no memory): allowed while she talks."""
     return await _build_f_control(request, "/api/build_f/conversation", "conversation",
-                                  _CONVERSATION_KEYS, check_busy=False)
+                                  ("ok", "silence_remarks", "choices", "interval_s", "tts_first_audio_timeout_ms",
+                                   "tts_sentence_timeout_ms"), check_busy=False)
 
 
 async def _build_f_control(request, route, action, allowed_fields, max_body=8192, check_busy=True, base=None,
