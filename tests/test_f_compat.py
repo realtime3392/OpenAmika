@@ -428,6 +428,52 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(self.sent(), "Bearer " + key)
         self.assertEqual(dict(dotenv_values(env)), {"OPENROUTER_API_KEY": "sk-or-another-providers-key", KEY_ENV: key})
 
+    def test_a_new_key_is_never_paired_with_the_address_of_the_old_one(self):
+        other = "https://other.example/v1"
+        self.detect(BASE, api_key="sk-first")
+        held = load_compat_config(self.root)                     # what a call or the page's poll read before the change
+        seen = []
+
+        def watching(write):
+            def watched(*args, **kwargs):
+                write(*args, **kwargs)
+                fresh = load_compat_config(self.root)            # what a call reads from here on
+                seen.append((saved_key(held, BASE), saved_key(held, other), saved_key(fresh, BASE), saved_key(fresh, other)))
+            return watched
+        with patch.object(f_compat, "save_key", watching(f_compat.save_key)), \
+                patch.object(f_compat, "save_compat_config", watching(f_compat.save_compat_config)):
+            self.assertEqual(self.detect(other, api_key="sk-second").status_code, 200)
+        self.assertEqual(seen, [("sk-first", "", "", ""),        # the old address is unbound on disk,
+                                ("", "", "", ""),                # the key is replaced: it is bound to no address,
+                                ("", "", "", "sk-second")])      # the new address is bound
+        self.assertEqual(self.sent(), "Bearer sk-second")
+        self.detect(BASE)
+        self.assertIsNone(self.sent())                           # the old address gets neither key from now on
+
+    def test_a_write_that_fails_while_the_key_changes_leaves_it_bound_to_no_address(self):
+        other = "https://other.example/v1"
+        self.detect(BASE, api_key="sk-first")
+        write, writes = f_compat.save_compat_config, []
+
+        def failing_on_the_second(root, doc):
+            writes.append(doc)
+            if len(writes) == 2:
+                raise OSError("no space left on device")
+            write(root, doc)
+        with patch.object(f_compat, "save_compat_config", failing_on_the_second), self.assertLogs("test", "ERROR"):
+            self.assertEqual(self.detect(other, api_key="sk-second").status_code, 500)
+        self.assertIn(KEY_ENV + "=sk-second", (self.root / "brain" / ".env").read_text(encoding="utf-8"))
+        config = load_compat_config(self.root)
+        self.assertEqual((config["key_base_url"], saved_key(config, BASE), saved_key(config, other)), (None, "", ""))
+        self.assertFalse(self.web.get("/api/build_f/compat").get_json()["key_saved"])
+
+    def test_a_new_key_for_the_same_address_keeps_it_bound(self):
+        self.detect(BASE, api_key="sk-first")
+        held = load_compat_config(self.root)
+        self.assertTrue(self.detect(BASE, api_key="sk-second").get_json()["key_saved"])
+        self.assertEqual(saved_key(held, BASE), "")              # read before the change: no key until read again
+        self.assertEqual(saved_key(load_compat_config(self.root), BASE), "sk-second")
+
     def test_a_public_address_over_plain_http_is_refused_before_anything_is_asked_or_saved(self):
         reply = self.detect("http://8.8.8.8:8000/v1", api_key="sk-secret")
         self.assertEqual(reply.status_code, 400)

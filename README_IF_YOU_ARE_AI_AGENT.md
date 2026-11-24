@@ -599,10 +599,12 @@ prompt: unlike Ollama, this transport cannot set the context window, so the serv
   the server accepts it: in `brain/.env` as `OPENAI_COMPAT_API_KEY`, with the address it was entered for in
   `key_base_url` (`config/openai_compat.json`). A key with a space or one of `$ # " ' \` or a backtick is refused
   before it is sent or saved: the reader of `brain/.env` would not give it back as written at her next start
-  (`${NAME}` would become that variable's value). It is sent only to that exact address: re-pointing the page, or an
-  entry with its own `base_url`, does not carry it elsewhere, and a key in the environment that is bound to no
-  address goes nowhere. No reply or log holds it (`key_saved` is a yes or no; a server that echoes the key has it
-  cut from the error). `launch.py --check` asks without the key. Put it in on the Setup page, not in the file by
+  (`${NAME}` would become that variable's value). A new key replaces the saved one: the old key's address is unbound
+  before the key changes and the new address is bound after, so the new key never goes to the old address, and a
+  write that fails in between leaves it bound to none. It is sent only to that exact address: re-pointing the page,
+  or an entry with its own `base_url`, does not carry it elsewhere, and a key in the environment that is bound to
+  no address goes nowhere. No reply or log holds it (`key_saved` is a yes or no; a server that echoes the key has
+  it cut from the error). `launch.py --check` asks without the key. Put it in on the Setup page, not in the file by
   hand.
 - Thinking in a separate field is ignored. Inline thinking (`<think>…</think>`, or only `</think>` when the opening
   tag is in the prompt) is removed before she can speak it (`ThinkFilter`). Where a server honours it,

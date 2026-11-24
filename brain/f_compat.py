@@ -30,11 +30,13 @@ What these servers do not have in common, and how each is handled here:
 import contextlib
 import copy
 import ipaddress
+import itertools
 import json
 import math
 import os
 import re
 import socket
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -66,6 +68,16 @@ _CLOSE_RE = re.compile(r"</(?:think|thinking|reasoning)>", re.I)
 # this and is held back until its closing tag. The other roles are not spoken, so all of their text can wait.
 _SPOKEN_STARTS = {"surface": ("status",), "deep": ("[", "我说", "我接着说", "我心想")}
 _QUIRKS = {}                                   # chat URL -> what its server refused (learned from a 400)
+# The key is in brain/.env and the address it is bound to is in the config file, so the two cannot change in one
+# step. Three things keep a key from being paired with the address another key was entered for:
+# - save_key numbers each new key (_KEY_STAMP) and a config remembers the number it was read under, so a config
+#   read before the key was replaced gets no key (saved_key);
+# - the detect route takes the old key's address off the disk before it replaces the key, and binds the new address
+#   after: a config read in between has no address in it;
+# - one detect at a time reads the file, changes it and writes it back (_SAVING).
+_KEY_CHANGES = itertools.count(1)
+_KEY_STAMP = 0
+_SAVING = threading.Lock()
 
 
 def compat_base_url(url):
@@ -156,8 +168,13 @@ def _model_row(row):
         return None
 
 
+class _Read(dict):
+    """The config as load_compat_config read it. key_stamp: the number of the key that was in force then."""
+
+
 def load_compat_config(root):
     """config/openai_compat.json as the role manager uses it (defaults when the file is missing or odd)."""
+    stamp = _KEY_STAMP          # taken before the file is read: what is read belongs to this key or to a later one
     path = Path(root) / "config" / CONFIG_NAME
     doc = {}
     if path.is_file():
@@ -172,9 +189,11 @@ def load_compat_config(root):
     except ValueError:
         base = DEFAULT_URL
     bound = doc.get("key_base_url")
-    return {"base_url": base, "key_base_url": bound if isinstance(bound, str) else None,
-            "detected_at": doc.get("detected_at"),
-            "models": [m for m in (_model_row(r) for r in (doc.get("models") or [])) if m]}
+    config = _Read({"base_url": base, "key_base_url": bound if isinstance(bound, str) else None,
+                    "detected_at": doc.get("detected_at"),
+                    "models": [m for m in (_model_row(r) for r in (doc.get("models") or [])) if m]})
+    config.key_stamp = stamp
+    return config
 
 
 def save_compat_config(root, doc):
@@ -182,15 +201,19 @@ def save_compat_config(root, doc):
 
 
 def saved_key(compat, base_url=None):
-    """The key from brain/.env, only for the address it was entered for; "" for any other address."""
+    """The key from brain/.env, only for the address it was entered for; "" for any other address. `compat` is the
+    config as load_compat_config read it: one read before the key was last replaced gets "" too, because the
+    address in it was bound to the key before and says nothing about this one."""
     bound = compat.get("key_base_url")
     if not bound or bound != (base_url or compat.get("base_url")):
         return ""
-    return os.getenv(KEY_ENV) or ""
+    key = os.getenv(KEY_ENV) or ""      # read before the numbers are compared: save_key changes the number first
+    return key if getattr(compat, "key_stamp", _KEY_STAMP) == _KEY_STAMP else ""
 
 
 def save_key(env_path, key):
     """Write the key into brain/.env, the file every other provider key lives in."""
+    global _KEY_STAMP
     from f_persona import _write_atomic
     if not _KEY_RE.fullmatch(key):
         raise ValueError(KEY_REFUSED)       # the file's reader would not give it back as written
@@ -204,6 +227,7 @@ def save_key(env_path, key):
     else:
         lines.append(entry)
     _write_atomic(env_path, "\n".join(lines) + "\n")
+    _KEY_STAMP = next(_KEY_CHANGES)     # before the key itself: from here on a config read earlier gets no key
     os.environ[KEY_ENV] = key
 
 
@@ -617,24 +641,33 @@ def install_compat(g):
             new_key = str(value.get("api_key") or "").strip()
             if new_key and not _KEY_RE.fullmatch(new_key):
                 raise ValueError(KEY_REFUSED)       # before it is sent anywhere or saved
-            current = load_compat_config(root)
-            bound = current.get("key_base_url")
-            key = new_key or saved_key(current, base)     # a saved key goes only to the address it was entered for
+            # a saved key goes only to the address it was entered for
+            key = new_key or saved_key(load_compat_config(root), base)
             try:
                 models = discover(g["http_requests"], base, key)
             except OpenRouterError as error:
                 return jsonify({"ok": False, "error": f"No usable answer from {base}: {str(error)[:160]}"}), 503
             except Exception:
                 return jsonify({"ok": False, "error": f"Nothing answers at {base} — is the model server running?"}), 503
-            if new_key:                         # only a key the server has just accepted is kept, bound to this address
-                save_key(root / "brain" / ".env", new_key)
-                bound = base
-            save_compat_config(root, {"base_url": base, "key_base_url": bound,
-                                      "models": merged_models(current["models"], models),
-                                      "detected_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
             manager = g.get("F_ROLES")
-            if manager is not None:
-                manager.reload_compat()
+            with _SAVING:                       # one detect at a time reads the file, changes it and writes it back
+                current = load_compat_config(root)
+                bound = current.get("key_base_url")
+                try:
+                    if new_key:                 # only a key the server has just accepted is kept, bound to this address
+                        if bound and bound != base:
+                            # The old key's address comes off the disk before the key is replaced, and this
+                            # address goes on after: the new key is never bound to the old key's address, and a
+                            # write that fails in between leaves the key bound to no address.
+                            save_compat_config(root, dict(current, key_base_url=None))
+                        save_key(root / "brain" / ".env", new_key)
+                        bound = base
+                    save_compat_config(root, {"base_url": base, "key_base_url": bound,
+                                              "models": merged_models(current["models"], models),
+                                              "detected_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+                finally:
+                    if manager is not None:
+                        manager.reload_compat()     # what is in force is what is on disk, after a failed write too
             out = status(probe=False)
             out["reachable"] = True
             return jsonify(out)
