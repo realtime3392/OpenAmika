@@ -95,6 +95,43 @@ def _wordmap_refresh():
         logger.warning(f"[wordmap] load failed: {e}")
 
 
+# ----------------------------- voice timeouts ------------------------------ #
+# config/build_f.json, saved by Setup -> You & Amika through the brain. "tts_first_audio_timeout_ms": how long the
+# first sentence of a reply may take before the turn counts as started (the sentence still plays when it arrives).
+# "tts_sentence_timeout_ms": how long any one sentence may take before it is skipped. Read again only when the file
+# changes, so a change applies from her next sentence.
+_BUILD_F_PATH = Path(__file__).resolve().parent.parent / "config" / "build_f.json"
+VOICE_TIMEOUT_RANGE_MS = (500, 60000)
+_voice_timeouts = {"mtime": None, "values": {}}
+
+
+def _voice_timeout_ms(key, default):
+    """The timeout from build_f.json, or the default when it is missing, unreadable, not a whole number of
+    milliseconds, or out of range. The first-audio timeout is never longer than the sentence timeout: past the
+    sentence timeout the sentence is already skipped, and the turn would not be protected by the timer."""
+    try:
+        mtime = os.stat(_BUILD_F_PATH).st_mtime_ns
+        if mtime != _voice_timeouts["mtime"]:
+            with open(_BUILD_F_PATH, encoding="utf-8-sig") as f:     # the brain writes it, and may write a BOM
+                document = json.load(f)
+            _voice_timeouts["values"] = document if isinstance(document, dict) else {}
+            _voice_timeouts["mtime"] = mtime
+    except (OSError, ValueError):
+        _voice_timeouts["values"], _voice_timeouts["mtime"] = {}, None
+    low, high = VOICE_TIMEOUT_RANGE_MS
+
+    def read(name, fallback):
+        value = _voice_timeouts["values"].get(name)
+        if isinstance(value, int) and not isinstance(value, bool) and low <= value <= high:
+            return value
+        return fallback
+
+    value = read(key, default)
+    if key == "tts_first_audio_timeout_ms":
+        value = min(value, read("tts_sentence_timeout_ms", DialogSession.TTS_INFLIGHT_TIMEOUT_MS))
+    return value
+
+
 def apply_wordmap(text, which):
     """which = 'stt' (transcript -> Hane) or 'tts' (reply -> Freya). For 'tts' the rules are followed by
     speech/tts_text.voice_text: capitals for emphasis are lower-cased (acronyms and "tts_keep_caps" stay), dashes
@@ -783,7 +820,9 @@ async def build_f_conversation_get():
                 payload = await response.json()
         if not isinstance(payload, dict) or payload.get("ok") is not True:
             raise ValueError("Unexpected conversation settings")
-        return {key: payload.get(key) for key in ("ok", "silence_remarks", "choices", "interval_s")}
+        # (the field list is spelled out here: tests load this function on its own, without module constants)
+        return {key: payload.get(key) for key in ("ok", "silence_remarks", "choices", "interval_s",
+                                                  "tts_first_audio_timeout_ms", "tts_sentence_timeout_ms")}
     except HTTPException:
         raise
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
@@ -794,7 +833,8 @@ async def build_f_conversation_get():
 async def build_f_conversation_set(request: Request):
     """A settings change only (no turn, no memory): allowed while she talks."""
     return await _build_f_control(request, "/api/build_f/conversation", "conversation",
-                                  ("ok", "silence_remarks", "choices", "interval_s"), check_busy=False)
+                                  ("ok", "silence_remarks", "choices", "interval_s", "tts_first_audio_timeout_ms",
+                                   "tts_sentence_timeout_ms"), check_busy=False)
 
 
 async def _build_f_control(request, route, action, allowed_fields, max_body=8192, check_busy=True, base=None,
@@ -2812,8 +2852,9 @@ class DialogSession:
     OFFLINE_PAUSE_MS = 900  # 离线：Hane/TTS 没连上时退化为纯 STT，900ms 直接 reset（原有行为）
     PRE_SPEECH_PAD_MS = 200 # IDLE 时保留最近 N ms 音频，开口时塞回前面，防止丢字头
     MAX_UTTERANCE_SEC = 30
+    # Defaults; config/build_f.json "tts_first_audio_timeout_ms" and "tts_sentence_timeout_ms" override them.
     TTS_FIRST_AUDIO_TIMEOUT_MS = 2000  # 发出 TTS 请求后 2s 内没首音频 -> 视为已到达，直接 protect
-    TTS_INFLIGHT_TIMEOUT_MS = 5000  # 任一句 TTS 5s 内没回 audio_ready/error -> 跳过排空队列，防卡死
+    TTS_INFLIGHT_TIMEOUT_MS = 10000  # 任一句 TTS 10s 内没回 audio_ready/error -> 跳过排空队列，防卡死
     # 真打断"迟到确认"门控：仅在 AI 实际正在说话（_protected=True 且 TTS 还在活跃）时生效。
     # 从 VAD 首次检测到用户语音起：
     #   0  - INTERRUPT_GATE_LOCK_MS   锁定期，静默吃掉；帧入 probe 缓冲
@@ -3802,7 +3843,7 @@ class DialogSession:
         asyncio.create_task(
             self._tts_inflight_watchdog(task_id, self._committed_turn_id)
         )
-        # 超时兜底：1s 内没收到首段音频 → 视为已收到，走 protect + reset，避免卡死
+        # 超时兜底：首段音频超时（tts_first_audio_timeout_ms）→ 视为已收到，走 protect；这句仍在途，到了照样播
         if not self._tts_first_audio_sent:
             asyncio.create_task(
                 self._tts_first_audio_watchdog(task_id, self._committed_turn_id)
@@ -4020,10 +4061,13 @@ class DialogSession:
         self, task_id: str, turn_id_at_request: Optional[str],
     ):
         """TTS 首段音频超时兜底：
-        发出请求后 1s 内没收到任何首段音频 → 视为已到达，立即走 protect 流程，
+        发出请求后 tts_first_audio_timeout_ms（默认 2s）内没收到任何首段音频 → 视为已到达，立即走 protect 流程，
         避免 TTS 回包丢失/慢时永远卡在 POST_COMMIT，音频不分界。
+        The sentence stays in flight: a slow first sentence still plays when it arrives, and one that never comes
+        back is skipped by _tts_inflight_watchdog.
         """
-        await asyncio.sleep(self.TTS_FIRST_AUDIO_TIMEOUT_MS / 1000)
+        first_audio_ms = _voice_timeout_ms("tts_first_audio_timeout_ms", self.TTS_FIRST_AUDIO_TIMEOUT_MS)
+        await asyncio.sleep(first_audio_ms / 1000)
         # 已经收到首段 / 已经被清空 / 这个 task 不再是 inflight → 不做事
         if self._tts_first_audio_sent:
             return
@@ -4032,14 +4076,14 @@ class DialogSession:
             return
         # turn 已经换了（用户打断 / 延续）—— protect 流程里自会判断并跳过
         logger.warning(
-            f"[dlg {self._peer}] tts first-audio timeout ({self.TTS_FIRST_AUDIO_TIMEOUT_MS}ms), "
+            f"[dlg {self._peer}] tts first-audio timeout ({first_audio_ms}ms), "
             f"turn={turn_id_at_request} — treat as arrived"
         )
-        # 标记 + 清掉 inflight 和队列：TTS 看起来丢了，后面的句子也别指望
+        # Mark the first audio as arrived so the turn is protected, but keep the
+        # sentence in flight and the queue: a slow first sentence (the voice shares
+        # the GPU with the deep pass) still plays in its place when it arrives. A
+        # sentence that never comes back is skipped by _tts_inflight_watchdog.
         self._tts_first_audio_sent = True
-        self._tl_hook("note_tts_failed", turn_id_at_request, inflight.get("idx"))
-        self._tts_inflight = None
-        self._tts_sentence_queue.clear()
         # 直接 protect（delay=0）：已经等过 1s 了，不再叠加
         asyncio.create_task(
             self._protect_after_first_audio(turn_id_at_request, delay=0.0)
@@ -4051,12 +4095,13 @@ class DialogSession:
         """每句 TTS 兜底：发出后 TTS_INFLIGHT_TIMEOUT_MS 内既没 audio_ready 也没 error
         回来 → 视为这句丢了，清 inflight 并继续排空队列。否则一句卡死会让 _tts_inflight
         永远非空、"audio busy" 门一直为真，后续 inject（念弹幕 / SC）全被吞。"""
-        await asyncio.sleep(self.TTS_INFLIGHT_TIMEOUT_MS / 1000)
+        sentence_ms = _voice_timeout_ms("tts_sentence_timeout_ms", self.TTS_INFLIGHT_TIMEOUT_MS)
+        await asyncio.sleep(sentence_ms / 1000)
         inflight = self._tts_inflight
         if inflight is None or inflight.get("task_id") != task_id:
             return                       # 已被 audio_ready / error / reset 消耗
         logger.warning(
-            f"[dlg {self._peer}] tts inflight timeout ({self.TTS_INFLIGHT_TIMEOUT_MS}ms) "
+            f"[dlg {self._peer}] tts inflight timeout ({sentence_ms}ms) "
             f"idx={inflight.get('idx')} turn={turn_id_at_request} — skip, drain queue"
         )
         self._tl_hook("note_tts_failed", turn_id_at_request, inflight.get("idx"))

@@ -745,18 +745,37 @@
   });
 
   // her silence remarks ("you're quiet"): off / rare / normal, counted from the moment her voice stops
+  // the conversation settings: her silence remarks, and her voice's two timeouts
+  function showVoiceTimeouts(r, only) {
+    for (const [id, key] of [["pVoiceFirst", "tts_first_audio_timeout_ms"], ["pVoiceSentence", "tts_sentence_timeout_ms"]]) {
+      if ((!only || only === key) && r[key]) $(id).value = r[key];
+    }
+  }
   function showSilence(r) {
     $("pSilence").value = r.silence_remarks || "normal";
     $("pSilenceNote").textContent = r.interval_s ? "After about " + r.interval_s + " s of quiet, counted from the moment her voice stops."
       : "She does not remark on silences.";
   }
-  getJSON("/api/build_f/conversation").then(showSilence).catch(() => { $("pSilenceNote").textContent = "unavailable (is the brain running?)"; });
+  getJSON("/api/build_f/conversation").then((r) => { showSilence(r); showVoiceTimeouts(r); }).catch(() => { $("pSilenceNote").textContent = "unavailable (is the brain running?)"; });
   $("pSilence").addEventListener("change", async () => {
     try {
       showSilence(await postAction("/api/build_f/conversation", "conversation", { silence_remarks: $("pSilence").value }));
       toast("Saved — applies at once.");
     } catch (error) { toast(String(error.message || error), true); }
   });
+  // her voice's two timeouts: saved on change, read by her voice on its next sentence
+  for (const [id, key] of [["pVoiceFirst", "tts_first_audio_timeout_ms"], ["pVoiceSentence", "tts_sentence_timeout_ms"]]) {
+    $(id).addEventListener("change", async () => {
+      const ms = Math.round(Number($(id).value));
+      try {
+        showVoiceTimeouts(await postAction("/api/build_f/conversation", "conversation", { [key]: ms }), key);
+        toast("Saved — applies from her next sentence.");
+      } catch (error) {
+        toast(String(error.message || error), true);
+        getJSON("/api/build_f/conversation").then((r) => showVoiceTimeouts(r, key)).catch(() => {});
+      }
+    });
+  }
 
   $("pSave").addEventListener("click", async () => {
     const target = $("pTarget").value;
