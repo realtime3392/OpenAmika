@@ -60,7 +60,8 @@ _URL_RE = re.compile(r"^https?://[A-Za-z0-9._\-\[\]:]+(?:/[A-Za-z0-9._~\-]+)*$")
 # place of ${NAME}, and reads a leading quote as the start of a quoted value. A key with one of $ " ' ` \ # could
 # come back from the file as something else, another provider's key included. Such a key is refused, like a space.
 _KEY_RE = re.compile(r"""(?:(?!["#$'\\`])[\x21-\x7e]){1,1024}""")
-KEY_REFUSED = "That API key has a space or one of $ # \" ' ` \\ in it, which a key cannot contain here."
+KEY_REFUSED = ("That API key has a space or a character a key cannot contain here: $ # \" ' ` \\ or anything that is "
+               "not plain ASCII.")
 _NOT_CHAT_RE = re.compile(r"embed|whisper|tts|dall-e|moderation|rerank", re.I)
 _OPEN_TAGS = ("<think>", "<thinking>", "<reasoning>")
 _CLOSE_RE = re.compile(r"</(?:think|thinking|reasoning)>", re.I)

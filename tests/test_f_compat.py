@@ -420,7 +420,7 @@ class RouteTests(unittest.TestCase):
         env = self.root / "brain" / ".env"
         env.write_text("OPENROUTER_API_KEY=sk-or-another-providers-key\n", encoding="utf-8")
         for key in ("${OPENROUTER_API_KEY}", "sk-${OPENROUTER_API_KEY}", "$HOME", '"sk-quoted"', "'sk-quoted'",
-                    "sk-`x`", "sk-back\\slash", "sk-#comment"):
+                    "sk-`x`", "sk-back\\slash", "sk-#comment", "sk-ключ", "sk-“quoted”", "k" * 1025):
             reply = self.detect(BASE, api_key=key)
             self.assertEqual(reply.status_code, 400, key)
             self.assertIn("a key cannot contain", reply.get_json()["error"])
