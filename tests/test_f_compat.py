@@ -403,6 +403,31 @@ class RouteTests(unittest.TestCase):
         self.assertFalse((self.root / "config" / f_compat.CONFIG_NAME).exists())
         self.assertEqual(self.detect(BASE, api_key="has space").status_code, 400)
 
+    def test_a_key_that_the_env_file_would_not_give_back_unchanged_is_refused_before_it_is_sent(self):
+        env = self.root / "brain" / ".env"
+        env.write_text("OPENROUTER_API_KEY=sk-or-another-providers-key\n", encoding="utf-8")
+        for key in ("${OPENROUTER_API_KEY}", "sk-${OPENROUTER_API_KEY}", "$HOME", '"sk-quoted"', "'sk-quoted'",
+                    "sk-`x`", "sk-back\\slash", "sk-#comment"):
+            reply = self.detect(BASE, api_key=key)
+            self.assertEqual(reply.status_code, 400, key)
+            self.assertIn("a key cannot contain", reply.get_json()["error"])
+            with self.assertRaises(ValueError):
+                save_key(env, key)
+        self.assertEqual(self.http.calls, [])                    # nothing was asked of any server
+        self.assertEqual(env.read_text(encoding="utf-8"), "OPENROUTER_API_KEY=sk-or-another-providers-key\n")
+        self.assertFalse((self.root / "config" / f_compat.CONFIG_NAME).exists())
+        self.assertIsNone(os.environ.get(KEY_ENV))
+
+    def test_a_saved_key_is_the_same_key_when_the_brain_next_starts(self):
+        from dotenv import dotenv_values                         # what the brain reads brain/.env with at its start
+        env = self.root / "brain" / ".env"
+        env.write_text("OPENROUTER_API_KEY=sk-or-another-providers-key\n", encoding="utf-8")
+        key = "".join(chr(code) for code in range(0x21, 0x7f) if chr(code) not in "\"#$'\\`")    # all a key may have
+        self.assertEqual(len(key), 88)
+        self.assertEqual(self.detect(BASE, api_key=key).status_code, 200)
+        self.assertEqual(self.sent(), "Bearer " + key)
+        self.assertEqual(dict(dotenv_values(env)), {"OPENROUTER_API_KEY": "sk-or-another-providers-key", KEY_ENV: key})
+
     def test_a_public_address_over_plain_http_is_refused_before_anything_is_asked_or_saved(self):
         reply = self.detect("http://8.8.8.8:8000/v1", api_key="sk-secret")
         self.assertEqual(reply.status_code, 400)

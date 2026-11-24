@@ -54,7 +54,11 @@ ADDRESS_NEEDED = "The server address must look like http://127.0.0.1:1234/v1 or 
 USE_HTTPS = "plain http is for local servers only: use https for a server outside your own network"
 
 _URL_RE = re.compile(r"^https?://[A-Za-z0-9._\-\[\]:]+(?:/[A-Za-z0-9._~\-]+)*$")
-_KEY_RE = re.compile(r"[\x21-\x7e]{1,1024}")
+# A key is kept in brain/.env, which python-dotenv reads when the brain starts: it puts another variable's value in
+# place of ${NAME}, and reads a leading quote as the start of a quoted value. A key with one of $ " ' ` \ # could
+# come back from the file as something else, another provider's key included. Such a key is refused, like a space.
+_KEY_RE = re.compile(r"""(?:(?!["#$'\\`])[\x21-\x7e]){1,1024}""")
+KEY_REFUSED = "That API key has a space or one of $ # \" ' ` \\ in it, which a key cannot contain here."
 _NOT_CHAT_RE = re.compile(r"embed|whisper|tts|dall-e|moderation|rerank", re.I)
 _OPEN_TAGS = ("<think>", "<thinking>", "<reasoning>")
 _CLOSE_RE = re.compile(r"</(?:think|thinking|reasoning)>", re.I)
@@ -188,6 +192,8 @@ def saved_key(compat, base_url=None):
 def save_key(env_path, key):
     """Write the key into brain/.env, the file every other provider key lives in."""
     from f_persona import _write_atomic
+    if not _KEY_RE.fullmatch(key):
+        raise ValueError(KEY_REFUSED)       # the file's reader would not give it back as written
     env_path = Path(env_path)
     lines = env_path.read_text(encoding="utf-8-sig").splitlines() if env_path.is_file() else []
     entry = f"{KEY_ENV}={key}"
@@ -610,7 +616,7 @@ def install_compat(g):
             local_address(base)                 # public over plain http: refused before anything is asked or saved
             new_key = str(value.get("api_key") or "").strip()
             if new_key and not _KEY_RE.fullmatch(new_key):
-                raise ValueError("That API key has spaces or characters a key cannot contain.")
+                raise ValueError(KEY_REFUSED)       # before it is sent anywhere or saved
             current = load_compat_config(root)
             bound = current.get("key_base_url")
             key = new_key or saved_key(current, base)     # a saved key goes only to the address it was entered for

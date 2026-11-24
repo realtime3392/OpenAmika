@@ -597,7 +597,9 @@ prompt: unlike Ollama, this transport cannot set the context window, so the serv
   followed.
 - **The key is optional and bound to its address.** A key typed with the address is tried first and saved only if
   the server accepts it: in `brain/.env` as `OPENAI_COMPAT_API_KEY`, with the address it was entered for in
-  `key_base_url` (`config/openai_compat.json`). It is sent only to that exact address: re-pointing the page, or an
+  `key_base_url` (`config/openai_compat.json`). A key with a space or one of `$ # " ' \` or a backtick is refused
+  before it is sent or saved: the reader of `brain/.env` would not give it back as written at her next start
+  (`${NAME}` would become that variable's value). It is sent only to that exact address: re-pointing the page, or an
   entry with its own `base_url`, does not carry it elsewhere, and a key in the environment that is bound to no
   address goes nowhere. No reply or log holds it (`key_saved` is a yes or no; a server that echoes the key has it
   cut from the error). `launch.py --check` asks without the key. Put it in on the Setup page, not in the file by
